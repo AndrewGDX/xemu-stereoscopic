@@ -175,13 +175,18 @@ void ShowMainMenu()
                 }
             }
 
-            ImGui::Combo("Backend", &g_config.display.renderer,
+            if (ImGui::Combo("Backend", &g_config.display.renderer,
                  "Null\0"
                  "OpenGL\0"
 #ifdef CONFIG_VULKAN
                  "Vulkan\0"
 #endif
-                );
+                )) {
+#ifdef __APPLE__
+                xemu_queue_notification(
+                    "Restart xemu to apply renderer backend changes");
+#endif
+            }
 
             int rendering_scale = nv2a_get_surface_scale_factor() - 1;
             if (ImGui::Combo("Int. Resolution Scale", &rendering_scale,

@@ -315,6 +315,21 @@ static bool attempt_renderer_init(PGRAPHState *pg)
     return true;
 }
 
+static bool pgraph_runtime_renderer_switch_supported(void)
+{
+#ifdef __APPLE__
+    /*
+     * The macOS UI still consumes the framebuffer through the existing GL
+     * presentation path, and live backend swaps can deadlock while the old
+     * renderer is being torn down mid-frame. Keep the requested backend in
+     * config and apply it on restart instead.
+     */
+    return false;
+#else
+    return true;
+#endif
+}
+
 static void init_renderer(PGRAPHState *pg)
 {
     if (attempt_renderer_init(pg)) {
@@ -3177,7 +3192,8 @@ void pgraph_process_pending(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     pg->renderer->ops.process_pending(d);
 
-    if (g_config.display.renderer != pg->renderer->type &&
+    if (pgraph_runtime_renderer_switch_supported() &&
+        g_config.display.renderer != pg->renderer->type &&
         pg->renderer_switch_phase == PGRAPH_RENDERER_SWITCH_PHASE_IDLE) {
         pg->renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_STARTED;
         qemu_event_reset(&pg->renderer_switch_complete);

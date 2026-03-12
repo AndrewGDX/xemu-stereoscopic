@@ -41,7 +41,11 @@
 #include "constants.h"
 #include "glsl.h"
 
+#ifdef __APPLE__
+#define HAVE_EXTERNAL_MEMORY 0
+#else
 #define HAVE_EXTERNAL_MEMORY 1
+#endif
 
 typedef struct QueueFamilyIndices {
     int queue_family;
@@ -108,7 +112,7 @@ typedef struct StorageBuffer {
 
 typedef struct SurfaceBinding {
     QTAILQ_ENTRY(SurfaceBinding) entry;
-    MemAccessCallback *access_cb;
+    struct MemAccessCallback *access_cb;
 
     hwaddr vram_addr;
 

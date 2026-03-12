@@ -7,6 +7,7 @@ Downloads required libraries for xemu builds on macOS from MacPorts repositories
 from urllib.request import urlopen
 import re
 import os.path
+import sys
 from tarfile import TarFile
 import subprocess
 
@@ -104,7 +105,9 @@ class LibInstaller:
 
 		print(f'[*] Fetching {pkg_name}')
 		pkg_filename, pkg_url = self.get_latest_pkg_filename_url(pkg_name)
-		pkg_version = pkg_filename[re.search(r'-\d', pkg_filename).span()[0]+1:]
+		version_match = re.search(r'-\d', pkg_filename)
+		assert version_match is not None
+		pkg_version = pkg_filename[version_match.span()[0]+1:]
 		pkg_version = pkg_version[:pkg_version.find('.'+self._darwin_target)]
 		dst_pkg_filename = os.path.join(self._pkgs_path, pkg_filename)
 		print(f'    [*] Found package {pkg_filename}')
@@ -119,11 +122,13 @@ class LibInstaller:
 
 		print(f'    [+] Looking for dependencies')
 		tb = TarFile.open(dst_pkg_filename)
-		pkg_contents_file = tb.extractfile('./+CONTENTS').read().decode('utf-8')
+		contents = tb.extractfile('./+CONTENTS')
+		assert contents is not None
+		pkg_contents_file = contents.read().decode('utf-8')
 		for dep in re.findall(r'@pkgdep (.+)', pkg_contents_file):
 			print(f'        [>] {dep}')
 			s = re.search(r'-\d', dep)
-			if s:
+			if s is not None:
 				dep = dep[0:s.span()[0]]
 			self._queue.append(dep)
 
@@ -131,10 +136,14 @@ class LibInstaller:
 
 		for fpath in tb.getnames():
 			extracted_path = os.path.realpath(os.path.join(self._extract_path, fpath))
-			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fname}'
+			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fpath}'
 
 		print(f'    [*] Extracting to {self._extract_path}')
-		tb.extractall(self._extract_path, numeric_owner=True)
+		if sys.version_info >= (3, 12):
+			tb.extractall(self._extract_path, numeric_owner=True,
+			              filter='fully_trusted')
+		else:
+			tb.extractall(self._extract_path, numeric_owner=True)
 
 		for fpath in tb.getnames():
 			# FIXME: Symlinks
@@ -181,6 +190,7 @@ def main():
 	args = ap.parse_args()
 	li = LibInstaller(args.arch)
 	li.install_pkgs([
+		'MoltenVK-latest',
 		'SDL3',
 		'glib2',
 		'libsamplerate',
@@ -188,7 +198,8 @@ def main():
 		'libepoxy',
 		'libpcap',
 		'libslirp',
-		'libusb'])
+		'libusb',
+		'vulkan-headers'])
 
 if __name__ == '__main__':
 	main()

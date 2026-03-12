@@ -737,17 +737,32 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
     }
 }
 
+MainMenuDisplayView::MainMenuDisplayView() : m_dirty(false)
+{
+}
+
 void MainMenuDisplayView::Draw()
 {
     SectionTitle("Renderer");
-    ChevronCombo("Backend", &g_config.display.renderer,
-                 "Null\0"
-                 "OpenGL\0"
+    if (m_dirty) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1),
+                           "Application restart required to apply backend changes");
+    }
+
+    if (ChevronCombo("Backend", &g_config.display.renderer,
+                     "Null\0"
+                     "OpenGL\0"
 #ifdef CONFIG_VULKAN
-                 "Vulkan\0"
+                     "Vulkan\0"
 #endif
-                 ,
-                 "Select desired renderer implementation");
+                     ,
+                     "Select desired renderer implementation")) {
+#ifdef __APPLE__
+        m_dirty = true;
+        xemu_queue_notification("Restart xemu to apply renderer backend changes");
+#endif
+    }
+
     int rendering_scale = nv2a_get_surface_scale_factor() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"

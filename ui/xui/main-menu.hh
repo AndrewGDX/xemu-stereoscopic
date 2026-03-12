@@ -67,7 +67,11 @@ public:
 class MainMenuDisplayView : public virtual MainMenuTabView
 {
 public:
+    MainMenuDisplayView();
     void Draw() override;
+
+private:
+    bool m_dirty;
 };
 
 class MainMenuAudioView : public virtual MainMenuTabView

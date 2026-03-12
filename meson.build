@@ -2357,6 +2357,13 @@ libglslang = not_found
 
 if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
+elif host_os == 'darwin'
+  if cc.has_header('vulkan/vulkan.h')
+    moltenvk = cc.find_library('MoltenVK', required: false)
+    if moltenvk.found()
+      vulkan = declare_dependency(dependencies: moltenvk)
+    endif
+  endif
 elif host_os == 'linux'
   vulkan = dependency('vulkan')
 endif

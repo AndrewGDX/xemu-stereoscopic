@@ -22,6 +22,62 @@
 #include "renderer.h"
 #include "xemu-version.h"
 
+#ifdef __APPLE__
+#include <dlfcn.h>
+
+#ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+#define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
+#endif
+
+#ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#endif
+
+#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+
+static void *moltenvk_handle;
+
+static PFN_vkGetInstanceProcAddr load_moltenvk_get_instance_proc_addr(Error **errp)
+{
+    static const char *const library_names[] = {
+        "@rpath/libMoltenVK.dylib",
+        "libMoltenVK.dylib",
+    };
+    PFN_vkGetInstanceProcAddr proc_addr = NULL;
+    const char *dl_error = NULL;
+
+    if (moltenvk_handle == NULL) {
+        for (int i = 0; i < ARRAY_SIZE(library_names); i++) {
+            dlerror();
+            moltenvk_handle = dlopen(library_names[i], RTLD_NOW | RTLD_LOCAL);
+            if (moltenvk_handle != NULL) {
+                break;
+            }
+            dl_error = dlerror();
+        }
+    }
+
+    if (moltenvk_handle == NULL) {
+        error_setg(errp, "Failed to load MoltenVK (%s)",
+                   dl_error ? dl_error : "unknown error");
+        return NULL;
+    }
+
+    dlerror();
+    *(void **)(&proc_addr) = dlsym(moltenvk_handle, "vkGetInstanceProcAddr");
+    dl_error = dlerror();
+    if (dl_error != NULL || proc_addr == NULL) {
+        error_setg(errp, "Failed to resolve vkGetInstanceProcAddr (%s)",
+                   dl_error ? dl_error : "unknown error");
+        return NULL;
+    }
+
+    return proc_addr;
+}
+#endif
+
 #define VkExtensionPropertiesArray GArray
 #define StringArray GArray
 
@@ -31,7 +87,8 @@ static char const *const validation_layers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-static char const *const required_device_extensions[] = {
+#if HAVE_EXTERNAL_MEMORY
+static char const *const external_memory_device_extensions[] = {
 #ifdef WIN32
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
@@ -40,6 +97,30 @@ static char const *const required_device_extensions[] = {
     VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
 #endif
 };
+#endif
+
+static bool initialize_volk(Error **errp)
+{
+#ifdef __APPLE__
+    PFN_vkGetInstanceProcAddr proc_addr =
+        load_moltenvk_get_instance_proc_addr(errp);
+
+    if (proc_addr == NULL) {
+        return false;
+    }
+
+    volkInitializeCustom(proc_addr);
+    return true;
+#else
+    VkResult result = volkInitialize();
+    if (result != VK_SUCCESS) {
+        error_setg(errp, "volkInitialize failed");
+        return false;
+    }
+
+    return true;
+#endif
+}
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -131,17 +212,26 @@ add_extension_if_available(VkExtensionPropertiesArray *available_extensions,
     return false;
 }
 
-static void
+static bool
 add_optional_instance_extension_names(PGRAPHState *pg,
-                                      VkExtensionPropertiesArray *available_extensions,
-                                      StringArray *enabled_extension_names)
+                                       VkExtensionPropertiesArray *available_extensions,
+                                       StringArray *enabled_extension_names)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+    bool portability_enumeration_extension_enabled = false;
 
     r->debug_utils_extension_enabled =
         g_config.display.vulkan.validation_layers &&
         add_extension_if_available(available_extensions, enabled_extension_names,
                                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+#ifdef __APPLE__
+    portability_enumeration_extension_enabled =
+        add_extension_if_available(available_extensions, enabled_extension_names,
+                                   VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
+
+    return portability_enumeration_extension_enabled;
 }
 
 static bool create_instance(PGRAPHState *pg, Error **errp)
@@ -149,9 +239,7 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
-    result = volkInitialize();
-    if (result != VK_SUCCESS) {
-        error_setg(errp, "volkInitialize failed");
+    if (!initialize_volk(errp)) {
         return false;
     }
 
@@ -182,8 +270,9 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     g_autoptr(StringArray) enabled_extension_names =
         g_array_new(FALSE, FALSE, sizeof(char *));
 
-    add_optional_instance_extension_names(pg, available_extensions,
-                                          enabled_extension_names);
+    bool portability_enumeration_extension_enabled =
+        add_optional_instance_extension_names(pg, available_extensions,
+                                              enabled_extension_names);
 
     if (enabled_extension_names->len > 0) {
         fprintf(stderr, "Enabled instance extensions:\n");
@@ -197,9 +286,15 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = enabled_extension_names->len,
-        .ppEnabledExtensionNames =
-            &g_array_index(enabled_extension_names, const char *, 0),
+        .ppEnabledExtensionNames = enabled_extension_names->len ?
+            &g_array_index(enabled_extension_names, const char *, 0) : NULL,
     };
+
+#ifdef __APPLE__
+    if (portability_enumeration_extension_enabled) {
+        create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+#endif
 
     enable_validation = g_config.display.vulkan.validation_layers;
 
@@ -308,12 +403,12 @@ get_available_device_extensions(VkPhysicalDevice device)
 
 static StringArray *get_required_device_extension_names(void)
 {
-    StringArray *extensions =
-        g_array_sized_new(FALSE, FALSE, sizeof(char *),
-                          ARRAY_SIZE(required_device_extensions));
+    StringArray *extensions = g_array_new(FALSE, FALSE, sizeof(char *));
 
-    g_array_append_vals(extensions, required_device_extensions,
-                        ARRAY_SIZE(required_device_extensions));
+#if HAVE_EXTERNAL_MEMORY
+    g_array_append_vals(extensions, external_memory_device_extensions,
+                        ARRAY_SIZE(external_memory_device_extensions));
+#endif
 
     return extensions;
 }
@@ -331,6 +426,11 @@ static void add_optional_device_extension_names(
     r->memory_budget_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+
+#ifdef __APPLE__
+    add_extension_if_available(available_extensions, enabled_extension_names,
+                               VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -338,14 +438,16 @@ static bool check_device_support_required_extensions(VkPhysicalDevice device)
     g_autoptr(VkExtensionPropertiesArray) available_extensions =
         get_available_device_extensions(device);
 
-    for (int i = 0; i < ARRAY_SIZE(required_device_extensions); i++) {
+#if HAVE_EXTERNAL_MEMORY
+    for (int i = 0; i < ARRAY_SIZE(external_memory_device_extensions); i++) {
         if (!is_extension_available(available_extensions,
-                                    required_device_extensions[i])) {
+                                    external_memory_device_extensions[i])) {
             fprintf(stderr, "required device extension not found: %s\n",
-                    required_device_extensions[i]);
+                    external_memory_device_extensions[i]);
             return false;
         }
     }
+#endif
 
     return true;
 }
@@ -500,6 +602,7 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     };
 
     bool all_required_features_available = true;
+    bool missing_geometry_shader = false;
     for (int i = 0; i < ARRAY_SIZE(desired_features); i++) {
         if (desired_features[i].required &&
             desired_features[i].available != VK_TRUE) {
@@ -507,11 +610,23 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
                     "Error: Device does not support required feature %s\n",
                     desired_features[i].name);
             all_required_features_available = false;
+            if (!strcmp(desired_features[i].name, "geometryShader")) {
+                missing_geometry_shader = true;
+            }
         }
         *desired_features[i].enabled = desired_features[i].available;
     }
 
     if (!all_required_features_available) {
+#ifdef __APPLE__
+        if (missing_geometry_shader) {
+            error_setg(errp,
+                       "MoltenVK device '%s' does not support geometry shaders; "
+                       "xemu's Vulkan renderer cannot run on this Mac yet",
+                       r->device_props.deviceName);
+            return false;
+        }
+#endif
         error_setg(errp, "Device does not support required features");
         return false;
     }
@@ -535,8 +650,8 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         .pQueueCreateInfos = &queue_create_info,
         .pEnabledFeatures = &r->enabled_physical_device_features,
         .enabledExtensionCount = enabled_extension_names->len,
-        .ppEnabledExtensionNames =
-            &g_array_index(enabled_extension_names, const char *, 0),
+        .ppEnabledExtensionNames = enabled_extension_names->len ?
+            &g_array_index(enabled_extension_names, const char *, 0) : NULL,
         .pNext = next_struct,
     };
 
@@ -646,6 +761,13 @@ void pgraph_vk_finalize_instance(PGRAPHState *pg)
         vkDestroyInstance(r->instance, NULL);
         r->instance = VK_NULL_HANDLE;
     }
+
+#ifdef __APPLE__
+    if (moltenvk_handle != NULL) {
+        dlclose(moltenvk_handle);
+        moltenvk_handle = NULL;
+    }
+#endif
 
     volkFinalize();
 }

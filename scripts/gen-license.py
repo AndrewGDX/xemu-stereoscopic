@@ -12,6 +12,7 @@ import subprocess
 import os.path
 import re
 import sys
+from urllib.request import urlopen
 
 gplv2 = "gplv2"
 mit = "mit"
@@ -89,6 +90,22 @@ class Lib:
             self._version = self.submodule.head
             return self._version
 
+        if current_platform == windows:
+            for name in (self.pkg_win, self.name):
+                if name and name in versions:
+                    self._version = versions[name]
+                    return self._version
+        elif current_platform == macos:
+            for name in (self.pkg_mac, self.name):
+                if name and name in versions:
+                    self._version = versions[name]
+                    return self._version
+        elif current_platform == linux:
+            for name in (self.pkg_ubuntu, self.name):
+                if name and name in versions:
+                    self._version = versions[name]
+                    return self._version
+
         if self.pkgconfig:
             self._version = self.pkgconfig.modversion
             return self._version
@@ -107,9 +124,11 @@ class Lib:
                 .strip()
             )
             return self._version
-        elif current_platform == macos and self.pkg_mac:
-            self._version = versions[self.pkg_mac]
-            return self._version
+        elif current_platform == macos:
+            for name in (self.pkg_mac, self.name):
+                if name and name in versions:
+                    self._version = versions[name]
+                    return self._version
         elif current_platform == linux and self.pkg_ubuntu:
             self._version = (
                 subprocess.run(
@@ -130,13 +149,13 @@ class Lib:
         if os.path.exists(self.license_path):
             with open(self.license_path, "r", encoding="utf-8") as f:
                 return f.read()
-        import requests
 
-        d = requests.get(self.license_url).content.decode("utf-8")
+        assert self.license_url, "Missing license URL for " + self.name
+        d = urlopen(self.license_url).read().decode("utf-8")
         if self.license_lines:
             start, end = self.license_lines
             d = "\n".join(d.splitlines()[start - 1 : end + 1])
-        with open(fname, "w") as f:
+        with open(self.license_path, "w", encoding="utf-8") as f:
             f.write(d)
         return d
 
@@ -327,6 +346,16 @@ LIBS = [
         "https://raw.githubusercontent.com/KhronosGroup/glslang/main/LICENSE.txt",
         ships_static=all_platforms,
         submodule=Submodule("subprojects/glslang.wrap"),
+    ),
+    Lib(
+        "MoltenVK",
+        "https://github.com/KhronosGroup/MoltenVK",
+        apache2,
+        "https://raw.githubusercontent.com/KhronosGroup/MoltenVK/main/LICENSE",
+        license_path="licenses/SPIRV-Reflect.license.txt",
+        ships_dynamic={macos},
+        pkg_mac="MoltenVK-latest",
+        platform={macos},
     ),
     Lib(
         "NVIDIA NVAPI",

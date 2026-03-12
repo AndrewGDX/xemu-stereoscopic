@@ -541,10 +541,10 @@ static void destroy_current_display_image(PGRAPHState *pg)
 
     destroy_frame_buffer(pg);
 
-#if HAVE_EXTERNAL_MEMORY
     glDeleteTextures(1, &d->gl_texture_id);
     d->gl_texture_id = 0;
 
+#if HAVE_EXTERNAL_MEMORY
     glDeleteMemoryObjectsEXT(1, &d->gl_memory_obj);
     d->gl_memory_obj = 0;
 
@@ -612,11 +612,14 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .format = VK_FORMAT_R8G8B8A8_UNORM,
         .tiling = use_optimal_tiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 #ifdef WIN32
@@ -626,6 +629,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
     };
     image_create_info.pNext = &external_memory_image_create_info;
+#endif
 
     VK_CHECK(vkCreateImage(r->device, &image_create_info, NULL, &d->image));
 
@@ -641,6 +645,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
     };
 
+#if HAVE_EXTERNAL_MEMORY
     VkExportMemoryAllocateInfo export_memory_alloc_info = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .handleTypes =
@@ -652,6 +657,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
             ,
     };
     alloc_info.pNext = &export_memory_alloc_info;
+#endif
 
     VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->memory));
     VK_CHECK(vkBindImageMemory(r->device, d->image, d->memory, 0));
@@ -711,6 +717,17 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, gl_internal_format,
                          image_create_info.extent.width,
                          image_create_info.extent.height, d->gl_memory_obj, 0);
+    assert(glGetError() == GL_NO_ERROR);
+
+#else
+    glGenTextures(1, &d->gl_texture_id);
+    glBindTexture(GL_TEXTURE_2D, d->gl_texture_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format,
+                 image_create_info.extent.width,
+                 image_create_info.extent.height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, NULL);
     assert(glGetError() == GL_NO_ERROR);
 
 #endif // HAVE_EXTERNAL_MEMORY
@@ -1001,6 +1018,84 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     disp->draw_time = surface->draw_time;
 }
 
+#if !HAVE_EXTERNAL_MEMORY
+static void update_display_texture(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+
+    assert(disp->gl_texture_id != 0);
+    assert((size_t)disp->width * disp->height * 4 <=
+           r->storage_buffers[BUFFER_STAGING_DST].buffer_size);
+
+    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
+
+    pgraph_vk_transition_image_layout(pg, cmd, disp->image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VkBufferMemoryBarrier pre_copy_dst_barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = r->storage_buffers[BUFFER_STAGING_DST].buffer,
+        .size = VK_WHOLE_SIZE,
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &pre_copy_dst_barrier, 0, NULL);
+
+    VkBufferImageCopy copy_region = {
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.layerCount = 1,
+        .imageExtent = (VkExtent3D){ disp->width, disp->height, 1 },
+    };
+    vkCmdCopyImageToBuffer(cmd, disp->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           r->storage_buffers[BUFFER_STAGING_DST].buffer, 1,
+                           &copy_region);
+
+    pgraph_vk_transition_image_layout(pg, cmd, disp->image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    VkBufferMemoryBarrier post_copy_dst_barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = r->storage_buffers[BUFFER_STAGING_DST].buffer,
+        .size = VK_WHOLE_SIZE,
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
+                         &post_copy_dst_barrier, 0, NULL);
+
+    pgraph_vk_end_single_time_commands(pg, cmd);
+
+    void *mapped_memory_ptr = NULL;
+    VK_CHECK(vmaMapMemory(r->allocator,
+                          r->storage_buffers[BUFFER_STAGING_DST].allocation,
+                          &mapped_memory_ptr));
+    vmaInvalidateAllocation(r->allocator,
+                            r->storage_buffers[BUFFER_STAGING_DST].allocation,
+                            0, VK_WHOLE_SIZE);
+
+    glBindTexture(GL_TEXTURE_2D, disp->gl_texture_id);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, disp->width, disp->height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, mapped_memory_ptr);
+    glFinish();
+    assert(glGetError() == GL_NO_ERROR);
+
+    vmaUnmapMemory(r->allocator,
+                   r->storage_buffers[BUFFER_STAGING_DST].allocation);
+}
+#endif
+
 static void create_surface_sampler(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1090,4 +1185,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     render_display(pg, surface);
+
+#if !HAVE_EXTERNAL_MEMORY
+    update_display_texture(pg);
+#endif
 }
