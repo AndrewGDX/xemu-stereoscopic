@@ -29,6 +29,7 @@
 static void surface_download(NV2AState *d, SurfaceBinding *surface, bool force);
 static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                        bool swizzle, bool flip, bool downscale,
+                                       bool unpack_stereo,
                                        uint8_t *pixels);
 static void surface_get_dimensions(PGRAPHState *pg, unsigned int *width, unsigned int *height);
 
@@ -289,16 +290,16 @@ static void render_surface_to_texture_slow(NV2AState *d,
 
     unsigned int width = surface->width,
                  height = surface->height;
-    pgraph_apply_scaling_factor(pg, &width, &height);
+    pgraph_apply_host_scaling_factor(pg, &width, &height);
 
     size_t bufsize = width * height * surface->fmt.bytes_per_pixel;
 
     uint8_t *buf = g_malloc(bufsize);
-    surface_download_to_buffer(d, surface, false, false, false, buf);
+    surface_download_to_buffer(d, surface, false, false, false, false, buf);
 
     width = texture_shape->width;
     height = texture_shape->height;
-    pgraph_apply_scaling_factor(pg, &width, &height);
+    pgraph_apply_host_scaling_factor(pg, &width, &height);
 
     glTexImage2D(texture->gl_target, 0, f->gl_internal_format, width, height, 0,
                  f->gl_format, f->gl_type, buf);
@@ -331,7 +332,7 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     }
 
     unsigned int width = texture_shape->width, height = texture_shape->height;
-    pgraph_apply_scaling_factor(pg, &width, &height);
+    pgraph_apply_host_scaling_factor(pg, &width, &height);
 
     glActiveTexture(GL_TEXTURE0 + texture_unit);
     glBindTexture(texture->gl_target, texture->gl_texture);
@@ -681,12 +682,16 @@ static void surface_copy_shrink_row(uint8_t *out, uint8_t *in,
 
 static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                        bool swizzle, bool flip, bool downscale,
+                                       bool unpack_stereo,
                                        uint8_t *pixels)
 {
     PGRAPHState *pg = &d->pgraph;
 
     swizzle &= surface->swizzle;
     downscale &= (pg->surface_scale_factor != 1);
+
+    bool stereo = pgraph_stereo_enabled();
+    bool stereo_unpack = stereo && unpack_stereo;
 
     if (!surface->width || !surface->height) {
         return;
@@ -723,23 +728,49 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
         gl_read_buf = swizzle_buf;
     }
 
-    if (downscale) {
-        pg->scale_buf = (uint8_t *)g_realloc(
-            pg->scale_buf, pg->surface_scale_factor * pg->surface_scale_factor *
-                               surface->size);
+    unsigned int mono_width = surface->width;
+    unsigned int mono_height = surface->height;
+    pgraph_apply_scaling_factor(pg, &mono_width, &mono_height);
+
+    unsigned int host_width = surface->width;
+    unsigned int host_height = surface->height;
+    pgraph_apply_host_scaling_factor(pg, &host_width, &host_height);
+
+    unsigned int host_pitch = surface->pitch * pg->surface_scale_factor;
+    if (stereo && !pgraph_stereo_internal_vertical() &&
+        g_config.display.stereo.full_framebuffer_per_eye) {
+        host_pitch *= 2;
+    }
+
+    uint8_t *mono_scaled_buf = NULL;
+    if (downscale || stereo_unpack) {
+        size_t mono_buf_size = mono_width * mono_height *
+                               surface->fmt.bytes_per_pixel;
+        pg->scale_buf = (uint8_t *)g_realloc(pg->scale_buf,
+                                             MAX((size_t)(host_width * host_height),
+                                                 (size_t)(mono_width * mono_height)) *
+                                                 surface->fmt.bytes_per_pixel);
         gl_read_buf = pg->scale_buf;
+        if (downscale || stereo_unpack) {
+            mono_scaled_buf = (uint8_t *)g_malloc(mono_buf_size);
+        }
     }
 
     glo_readpixels(
         surface->fmt.gl_format, surface->fmt.gl_type, surface->fmt.bytes_per_pixel,
-        pg->surface_scale_factor * surface->pitch,
-        pg->surface_scale_factor * surface->width,
-        pg->surface_scale_factor * surface->height, flip, gl_read_buf);
+        host_pitch, host_width, host_height, flip, gl_read_buf);
+
+    if (stereo_unpack) {
+        pgraph_unpack_stereo_buffer(pg, mono_scaled_buf, gl_read_buf,
+                                    mono_width, mono_height,
+                                    surface->fmt.bytes_per_pixel);
+        gl_read_buf = mono_scaled_buf;
+    }
 
     /* FIXME: Replace this with a hw accelerated version */
     if (downscale) {
         assert(surface->pitch >= (surface->width * surface->fmt.bytes_per_pixel));
-        uint8_t *out = swizzle_buf, *in = pg->scale_buf;
+        uint8_t *out = swizzle_buf, *in = gl_read_buf;
         for (unsigned int y = 0; y < surface->height; y++) {
             surface_copy_shrink_row(out, in, surface->width,
                                     surface->fmt.bytes_per_pixel,
@@ -751,9 +782,19 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
     }
 
     if (swizzle) {
+        if (!downscale && gl_read_buf != swizzle_buf) {
+            memcpy(swizzle_buf, gl_read_buf, surface->size);
+        }
         swizzle_rect(swizzle_buf, surface->width, surface->height, pixels,
                      surface->pitch, surface->fmt.bytes_per_pixel);
         g_free(swizzle_buf);
+    } else if (!downscale && stereo_unpack) {
+        memcpy(pixels, gl_read_buf,
+               surface->height * surface->pitch);
+    }
+
+    if (mono_scaled_buf) {
+        g_free(mono_scaled_buf);
     }
 
     /* Re-bind original framebuffer target */
@@ -773,7 +814,7 @@ static void surface_download(NV2AState *d, SurfaceBinding *surface, bool force)
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
 
-    surface_download_to_buffer(d, surface, true, false, true,
+    surface_download_to_buffer(d, surface, true, false, true, true,
                                d->vram_ptr + surface->vram_addr);
 
     memory_region_set_client_dirty(d->vram, surface->vram_addr,
@@ -936,15 +977,37 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     uint8_t *gl_read_buf = optimal_buf;
     unsigned int width = surface->width, height = surface->height;
 
+    unsigned int mono_width = surface->width;
+    unsigned int mono_height = surface->height;
+    pgraph_apply_scaling_factor(pg, &mono_width, &mono_height);
+
+    unsigned int host_width = surface->width;
+    unsigned int host_height = surface->height;
+    pgraph_apply_host_scaling_factor(pg, &host_width, &host_height);
+
+    g_autofree uint8_t *mono_scaled_buf = NULL;
     if (pg->surface_scale_factor > 1) {
-        pgraph_apply_scaling_factor(pg, &width, &height);
-        pg->scale_buf = (uint8_t *)g_realloc(
-            pg->scale_buf, width * height * surface->fmt.bytes_per_pixel);
-        gl_read_buf = pg->scale_buf;
-        uint8_t *out = gl_read_buf, *in = optimal_buf;
-        surface_copy_expand(out, in, surface->width, surface->height,
-                            surface->fmt.bytes_per_pixel,
+        mono_scaled_buf = g_malloc(mono_width * mono_height *
+                                   surface->fmt.bytes_per_pixel);
+        gl_read_buf = mono_scaled_buf;
+        surface_copy_expand(gl_read_buf, optimal_buf, surface->width,
+                            surface->height, surface->fmt.bytes_per_pixel,
                             d->pgraph.surface_scale_factor);
+    }
+
+    if (pgraph_stereo_enabled()) {
+        pg->scale_buf = (uint8_t *)g_realloc(
+            pg->scale_buf, host_width * host_height *
+                               surface->fmt.bytes_per_pixel);
+        pgraph_pack_stereo_buffer(pg, pg->scale_buf, gl_read_buf,
+                                  mono_width, mono_height,
+                                  surface->fmt.bytes_per_pixel);
+        gl_read_buf = pg->scale_buf;
+        width = host_width;
+        height = host_height;
+    } else if (pg->surface_scale_factor > 1) {
+        width = mono_width;
+        height = mono_height;
     }
 
     int prev_unpack_alignment;
@@ -1224,7 +1287,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             unsigned int width = entry.width ? entry.width : 1;
             unsigned int height = entry.height ? entry.height : 1;
-            pgraph_apply_scaling_factor(pg, &width, &height);
+            pgraph_apply_host_scaling_factor(pg, &width, &height);
             glTexImage2D(GL_TEXTURE_2D, 0, entry.fmt.gl_internal_format, width,
                          height, 0, entry.fmt.gl_format, entry.fmt.gl_type,
                          NULL);

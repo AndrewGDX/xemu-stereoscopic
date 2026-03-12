@@ -884,10 +884,17 @@ void ScaleDimensions(int src_width, int src_height, int max_width, int max_heigh
     }
 }
 
+static float GetEyeDisplayAspectRatio(int width, int height);
+static float GetDisplayAspectRatio(int width, int height);
+
 void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[2])
 {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
+
+    int tw, th;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
     
     switch (g_config.display.filtering) {
     case CONFIG_DISPLAY_FILTERING_LINEAR:
@@ -906,8 +913,6 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[
     glUseProgram(s->prog);
     glBindVertexArray(s->vao);
     glUniform1i(s->flipy_loc, s->flip);
-    glUniform4f(s->scale_offset_loc, scale[0], scale[1], 0, 0);
-    glUniform4f(s->tex_scale_offset_loc, 1.0, 1.0, 0, 0);
     glUniform1i(s->tex_loc, 0);
 
     const uint8_t *palette = nv2a_get_dac_palette();
@@ -921,15 +926,96 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[
     glClear(GL_COLOR_BUFFER_BIT);
 
     if (!nv2a_get_screen_off()) {
-        glDrawElements(GL_TRIANGLE_FAN, 4, GL_UNSIGNED_INT, NULL);
+        int frame_width = roundf(width * scale[0]);
+        int frame_height = roundf(height * scale[1]);
+        int frame_x = (width - frame_width) / 2;
+        int frame_y = (height - frame_height) / 2;
+
+        bool stereo = g_config.display.stereo.mode != CONFIG_DISPLAY_STEREO_MODE_OFF;
+        if (!stereo) {
+            RenderDecal(s, frame_x, frame_y, frame_width, frame_height, 0, 0,
+                        tw, th, 0, 0, 0);
+            return;
+        }
+
+        float packed_eye_aspect = GetEyeDisplayAspectRatio(tw, th);
+        int slot_width[2] = { frame_width, frame_width };
+        int slot_height[2] = { frame_height, frame_height };
+        int tex_width[2] = { tw, tw };
+        int tex_height[2] = { th, th };
+
+        if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE) {
+            packed_eye_aspect *=
+                g_config.display.stereo.sbs_aspect_mode ==
+                        CONFIG_DISPLAY_STEREO_SBS_ASPECT_MODE_FULL ?
+                    1.0f :
+                    0.5f;
+            slot_width[0] = frame_width / 2;
+            slot_width[1] = frame_width - slot_width[0];
+            tex_width[0] = tw / 2;
+            tex_width[1] = tw - tex_width[0];
+        } else {
+            packed_eye_aspect *= 2.0f;
+            slot_height[0] = frame_height / 2;
+            slot_height[1] = frame_height - slot_height[0];
+            tex_height[0] = th / 2;
+            tex_height[1] = th - tex_height[0];
+        }
+
+        for (int i = 0; i < 2; i++) {
+            int slot_x = frame_x;
+            int slot_y = frame_y;
+            int tex_x = 0;
+            int tex_y = 0;
+
+            if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE) {
+                if (i == 1) {
+                    slot_x += slot_width[0];
+                    tex_x += tex_width[0];
+                }
+            } else {
+                if (i == 1) {
+                    slot_y += slot_height[0];
+                    tex_y += tex_height[0];
+                }
+            }
+
+            int eye_width = slot_width[i];
+            int eye_height = slot_height[i];
+
+            if (g_config.display.ui.fit != CONFIG_DISPLAY_UI_FIT_STRETCH) {
+                int desired_width = roundf(tex_height[i] * packed_eye_aspect);
+                int desired_height = tex_height[i];
+
+                if (desired_width > eye_width || desired_height > eye_height ||
+                    g_config.display.ui.fit != CONFIG_DISPLAY_UI_FIT_CENTER) {
+                    ScaleDimensions(roundf(packed_eye_aspect * 1000.0f), 1000,
+                                    eye_width, eye_height, &desired_width,
+                                    &desired_height);
+                }
+
+                slot_x += (eye_width - desired_width) / 2;
+                slot_y += (eye_height - desired_height) / 2;
+                eye_width = desired_width;
+                eye_height = desired_height;
+            }
+
+            RenderDecal(s, slot_x, slot_y, eye_width, eye_height, tex_x, tex_y,
+                        tex_width[i], tex_height[i], 0, 0, 0);
+        }
     }
 }
 
-static float GetDisplayAspectRatio(int width, int height)
+static float GetEyeDisplayAspectRatio(int width, int height)
 {
     switch (g_config.display.ui.aspect_ratio) {
     case CONFIG_DISPLAY_UI_ASPECT_RATIO_NATIVE:
-        return (float)width/(float)height;
+        if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE &&
+            g_config.display.stereo.sbs_aspect_mode ==
+                CONFIG_DISPLAY_STEREO_SBS_ASPECT_MODE_FULL) {
+            return (float)width / (2.0f * height);
+        }
+        return (float)width / (float)height;
     case CONFIG_DISPLAY_UI_ASPECT_RATIO_16X9:
         return 16.0f/9.0f;
     case CONFIG_DISPLAY_UI_ASPECT_RATIO_4X3:
@@ -938,6 +1024,18 @@ static float GetDisplayAspectRatio(int width, int height)
     default:
         return xemu_get_widescreen() ? 16.0f/9.0f : 4.0f/3.0f;
     }
+}
+
+static float GetDisplayAspectRatio(int width, int height)
+{
+    if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE) {
+        return g_config.display.stereo.sbs_aspect_mode ==
+                       CONFIG_DISPLAY_STEREO_SBS_ASPECT_MODE_FULL ?
+                   32.0f / 9.0f :
+                   16.0f / 9.0f;
+    }
+
+    return GetEyeDisplayAspectRatio(width, height);
 }
 
 void RenderFramebuffer(GLint tex, int width, int height, bool flip)

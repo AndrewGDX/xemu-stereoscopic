@@ -228,6 +228,43 @@ display:
     type: enum
     values: ["NULL", OPENGL, VULKAN]
     default: OPENGL
+  stereo:
+    mode:
+      type: enum
+      values: [off, side_by_side, top_and_bottom]
+      default: off
+    dominant_eye:
+      type: enum
+      values: [none, left, right]
+      default: none
+    swap_eyes:
+      type: bool
+      default: false
+    separation:
+      type: number
+      default: 20.0
+    convergence:
+      type: number
+      default: 20.0
+    ui_depth:
+      type: number
+      default: 0.0
+    ui_second_layer_depth:
+      type: number
+      default: 0.0
+    ui_detection_threshold:
+      type: number
+      default: 50.0
+    sbs_aspect_mode:
+      type: enum
+      values: [half, full]
+      default: full
+    full_framebuffer_per_eye:
+      type: bool
+      default: false
+    flip_stereo_rendering:
+      type: bool
+      default: false
   vulkan:
     validation_layers: bool
     debug_shaders: bool

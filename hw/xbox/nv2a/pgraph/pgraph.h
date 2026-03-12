@@ -23,6 +23,7 @@
 #define HW_XBOX_NV2A_PGRAPH_H
 
 #include "xemu-config.h"
+#include "ui/xemu-settings.h"
 #include "qemu/osdep.h"
 #include "qemu/bitmap.h"
 #include "qemu/units.h"
@@ -264,6 +265,12 @@ typedef struct PGRAPHState {
     unsigned int surface_scale_factor;
     uint8_t *scale_buf;
 
+    struct {
+        int mode;
+        bool full_framebuffer_per_eye;
+        bool flip_stereo_rendering;
+    } applied_stereo_config;
+
     const PGRAPHRenderer *renderer;
     union {
         PGRAPHNullState *null_renderer_state;
@@ -380,12 +387,102 @@ static inline void pgraph_apply_anti_aliasing_factor(PGRAPHState *pg,
 }
 
 static inline void pgraph_apply_scaling_factor(PGRAPHState *pg,
-                                        unsigned int *width,
-                                        unsigned int *height)
+                                         unsigned int *width,
+                                         unsigned int *height)
 {
     *width *= pg->surface_scale_factor;
     *height *= pg->surface_scale_factor;
 }
+
+static inline bool pgraph_stereo_enabled(void)
+{
+    return g_config.display.stereo.mode != CONFIG_DISPLAY_STEREO_MODE_OFF;
+}
+
+static inline bool pgraph_stereo_internal_vertical(void)
+{
+    return pgraph_stereo_enabled() &&
+           g_config.display.stereo.flip_stereo_rendering;
+}
+
+static inline bool pgraph_stereo_effective_swap_eyes(void)
+{
+    return pgraph_stereo_enabled() &&
+           (g_config.display.stereo.swap_eyes !=
+            g_config.display.stereo.flip_stereo_rendering);
+}
+
+static inline unsigned int pgraph_stereo_instance_count(void)
+{
+    return pgraph_stereo_enabled() ? 2 : 1;
+}
+
+static inline void pgraph_get_stereo_slot_scale(float *x_scale,
+                                                float *y_scale)
+{
+    *x_scale = 1.0f;
+    *y_scale = 1.0f;
+
+    if (!pgraph_stereo_enabled()) {
+        return;
+    }
+
+    if (pgraph_stereo_internal_vertical()) {
+        *y_scale = g_config.display.stereo.full_framebuffer_per_eye ? 1.0f :
+                                                                      0.5f;
+    } else {
+        *x_scale = g_config.display.stereo.full_framebuffer_per_eye ? 1.0f :
+                                                                      0.5f;
+    }
+}
+
+static inline void pgraph_apply_host_scaling_factor(PGRAPHState *pg,
+                                                    unsigned int *width,
+                                                    unsigned int *height)
+{
+    pgraph_apply_scaling_factor(pg, width, height);
+
+    if (!pgraph_stereo_enabled() ||
+        !g_config.display.stereo.full_framebuffer_per_eye) {
+        return;
+    }
+
+    if (pgraph_stereo_internal_vertical()) {
+        *height *= 2;
+    } else {
+        *width *= 2;
+    }
+}
+
+static inline void pgraph_apply_display_scaling_factor(PGRAPHState *pg,
+                                                       unsigned int *width,
+                                                       unsigned int *height)
+{
+    pgraph_apply_scaling_factor(pg, width, height);
+}
+
+static inline void pgraph_get_display_output_size(PGRAPHState *pg,
+                                                  unsigned int *width,
+                                                  unsigned int *height)
+{
+    pgraph_apply_display_scaling_factor(pg, width, height);
+
+    if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE &&
+        g_config.display.stereo.sbs_aspect_mode ==
+            CONFIG_DISPLAY_STEREO_SBS_ASPECT_MODE_FULL) {
+        *width *= 2;
+    }
+}
+
+void pgraph_pack_stereo_buffer(PGRAPHState *pg, uint8_t *dst,
+                               const uint8_t *src, unsigned int mono_width,
+                               unsigned int mono_height,
+                               unsigned int bytes_per_pixel);
+void pgraph_unpack_stereo_buffer(PGRAPHState *pg, uint8_t *dst,
+                                 const uint8_t *src,
+                                 unsigned int mono_width,
+                                 unsigned int mono_height,
+                                 unsigned int bytes_per_pixel);
 
 void pgraph_get_clear_color(PGRAPHState *pg, float rgba[4]);
 void pgraph_get_clear_depth_stencil_value(PGRAPHState *pg, float *depth, int *stencil);

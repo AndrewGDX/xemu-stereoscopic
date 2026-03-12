@@ -219,8 +219,13 @@ typedef struct PGRAPHGLState {
     struct disp_rndr {
         GLuint fbo, vao, vbo, prog;
         GLuint display_size_loc;
+        GLuint source_display_size_loc;
         GLuint line_offset_loc;
         GLuint tex_loc;
+        GLint stereo_mode_loc;
+        GLint stereo_vertical_loc;
+        GLint left_eye_slot_loc;
+        GLint stereo_slot_scale_loc;
         GLuint pvideo_tex;
         GLint pvideo_enable_loc;
         GLint pvideo_tex_loc;

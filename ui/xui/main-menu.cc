@@ -739,6 +739,21 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
 
 void MainMenuDisplayView::Draw()
 {
+    auto stereo_slider = [](const char *label, float *value, float min_value,
+                            float max_value, const char *fmt) {
+        float normalized = (*value - min_value) / (max_value - min_value);
+        if (normalized < 0.0f) {
+            normalized = 0.0f;
+        } else if (normalized > 1.0f) {
+            normalized = 1.0f;
+        }
+
+        char description[64];
+        snprintf(description, sizeof(description), fmt, *value);
+        Slider(label, &normalized, description);
+        *value = min_value + normalized * (max_value - min_value);
+    };
+
     SectionTitle("Renderer");
     ChevronCombo("Backend", &g_config.display.renderer,
                  "Null\0"
@@ -763,6 +778,43 @@ void MainMenuDisplayView::Draw()
                      "Increase surface scaling factor for higher quality")) {
         nv2a_set_surface_scale_factor(rendering_scale+1);
     }
+
+    SectionTitle("Stereo");
+    ChevronCombo("Stereo mode", &g_config.display.stereo.mode,
+                 "Off\0"
+                 "Side by side\0"
+                 "Top and bottom\0",
+                 "Pack both eyes into a single stereoscopic framebuffer");
+    ChevronCombo("Dominant eye", &g_config.display.stereo.dominant_eye,
+                 "None\0"
+                 "Left\0"
+                 "Right\0",
+                 "Bias separation toward one eye");
+    Toggle("Swap eyes", &g_config.display.stereo.swap_eyes,
+           "Swap left and right eye output");
+    stereo_slider("Separation", &g_config.display.stereo.separation,
+                  0.0f, 200.0f, "Stereo separation (%.1f)");
+    stereo_slider("Convergence", &g_config.display.stereo.convergence,
+                  0.0f, 1000.0f, "Stereo convergence (%.1f)");
+    stereo_slider("UI depth", &g_config.display.stereo.ui_depth,
+                  -100.0f, 100.0f, "HUD depth offset (%.1f)");
+    stereo_slider("UI second layer depth",
+                  &g_config.display.stereo.ui_second_layer_depth,
+                  -100.0f, 100.0f, "Secondary HUD depth offset (%.1f)");
+    stereo_slider("UI detection threshold",
+                  &g_config.display.stereo.ui_detection_threshold,
+                  0.0f, 1000.0f, "HUD detection threshold (%.1f)");
+    ChevronCombo("SBS aspect ratio",
+                 &g_config.display.stereo.sbs_aspect_mode,
+                 "Half SBS\0"
+                 "Full SBS\0",
+                 "Choose half-width or full-width side-by-side output");
+    Toggle("Full framebuffer for each eye",
+           &g_config.display.stereo.full_framebuffer_per_eye,
+           "Use the full render target size for both eyes");
+    Toggle("Flip stereo rendering",
+           &g_config.display.stereo.flip_stereo_rendering,
+           "Pack stereo rendering vertically instead of horizontally");
 
     SectionTitle("Window");
     bool fs = xemu_is_fullscreen();

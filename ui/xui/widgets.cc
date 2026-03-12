@@ -253,6 +253,7 @@ void Slider(const char *str_id, float *v, const char *description)
     ImGui::SetCursorPos(ImVec2(wpos.x + size.x - slider_size.x - style.FramePadding.x,
                                wpos.y));
 
+    ImGui::PushID(str_id);
     ImGui::InvisibleButton("###slider", slider_size, 0);
 
 
@@ -294,6 +295,7 @@ void Slider(const char *str_id, float *v, const char *description)
 
     ImVec2 slider_max = ImVec2(slider_pos.x + slider_size.x, slider_pos.y + slider_size.y);
     ImGui::RenderNavHighlight(ImRect(slider_pos, slider_max), window->GetID("###slider"));
+    ImGui::PopID();
 
     ImGui::PopStyleColor();
 }

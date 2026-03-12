@@ -842,6 +842,37 @@ static MString* psh_convert(struct PixelShader *ps)
         mstring_append(preflight, "};\n");
     }
 
+    mstring_append(
+        preflight,
+        "vec2 get_surface_coord_scaled() {\n"
+        "    vec2 coord = gl_FragCoord.xy;\n"
+        "    if (stereoConfig.x > 0.5) {\n"
+        "        bool vertical = stereoConfig.y > 0.5;\n"
+        "        if (vertical) {\n"
+        "            float slot_size = surfaceSize.y * float(surfaceScale.y) * stereoConfig.w;\n"
+        "            float slot = clamp(floor(coord.y / max(slot_size, 0.000001)), 0.0, 1.0);\n"
+        "            coord.y = (coord.y - slot * slot_size) / max(stereoConfig.w, 0.000001);\n"
+        "        } else {\n"
+        "            float slot_size = surfaceSize.x * float(surfaceScale.x) * stereoConfig.z;\n"
+        "            float slot = clamp(floor(coord.x / max(slot_size, 0.000001)), 0.0, 1.0);\n"
+        "            coord.x = (coord.x - slot * slot_size) / max(stereoConfig.z, 0.000001);\n"
+        "        }\n"
+        "    }\n"
+        "    return coord;\n"
+        "}\n"
+        "int get_surface_stereo_slot(vec2 coord) {\n"
+        "    if (stereoConfig.x <= 0.5) {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    if (stereoConfig.y > 0.5) {\n"
+        "        return coord.y >= stereoSplit.y ? 1 : 0;\n"
+        "    }\n"
+        "    return coord.x >= stereoSplit.x ? 1 : 0;\n"
+        "}\n"
+        "vec2 get_surface_coord_unscaled(vec2 coord_scaled) {\n"
+        "    return coord_scaled / vec2(surfaceScale);\n"
+        "}\n");
+
     const char *dotmap_funcs[] = {
         "dotmap_zero_to_one",
         "dotmap_minus1_to_1_d3d",
@@ -975,7 +1006,7 @@ static MString* psh_convert(struct PixelShader *ps)
     if (!ps->state->window_clip_exclusive) {
         mstring_append(clip, "bool clipContained = false;\n");
     }
-    mstring_append(clip, "vec2 coord = gl_FragCoord.xy - 0.5;\n"
+    mstring_append(clip, "vec2 coord = surface_coord_scaled - 0.5;\n"
                          "for (int i = 0; i < 8; i++) {\n"
                          "  bool outside = any(bvec4(\n"
                          "      lessThan(coord, vec2(clipRegion[i].xy)),\n"
@@ -998,7 +1029,7 @@ static MString* psh_convert(struct PixelShader *ps)
     if (ps->state->z_perspective) {
         mstring_append(
             clip,
-            "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
+            "vec2 unscaled_xy = surface_coord_unscaled;\n"
             "precise float bc0 = area(unscaled_xy, vtxPos1.xy, vtxPos2.xy);\n"
             "precise float bc1 = area(unscaled_xy, vtxPos2.xy, vtxPos0.xy);\n"
             "precise float bc2 = area(unscaled_xy, vtxPos0.xy, vtxPos1.xy);\n"
@@ -1032,7 +1063,7 @@ static MString* psh_convert(struct PixelShader *ps)
     } else {
         mstring_append(
             clip,
-            "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
+            "vec2 unscaled_xy = surface_coord_unscaled;\n"
             "precise float bc0 = area(unscaled_xy, vtxPos1.xy, vtxPos2.xy);\n"
             "precise float bc1 = area(unscaled_xy, vtxPos2.xy, vtxPos0.xy);\n"
             "precise float bc2 = area(unscaled_xy, vtxPos0.xy, vtxPos1.xy);\n"
@@ -1507,6 +1538,20 @@ static MString* psh_convert(struct PixelShader *ps)
     mstring_append_fmt(final, "#version %d\n\n", ps->opts.vulkan ? 450 : 400);
     mstring_append(final, mstring_get_str(preflight));
     mstring_append(final, "void main() {\n");
+    mstring_append(
+        final,
+        "if (stereoConfig.x > 0.5 && stereoSlot != get_surface_stereo_slot(gl_FragCoord.xy)) {\n"
+        "  discard;\n"
+        "}\n"
+        "vec2 surface_coord_scaled = get_surface_coord_scaled();\n"
+        "vec2 surface_coord_unscaled = get_surface_coord_unscaled(surface_coord_scaled);\n"
+        "if (stereoConfig.x > 0.5) {\n"
+        "  vec2 surface_clip_max = surfaceClip.xy + surfaceClip.zw;\n"
+        "  if (any(bvec4(lessThan(surface_coord_unscaled, surfaceClip.xy),\n"
+        "                 greaterThanEqual(surface_coord_unscaled, surface_clip_max)))) {\n"
+        "    discard;\n"
+        "  }\n"
+        "}\n");
     mstring_append(final, mstring_get_str(clip));
     mstring_append(final, mstring_get_str(vars));
     mstring_append(final, mstring_get_str(ps->code));
@@ -1748,6 +1793,49 @@ void pgraph_glsl_set_psh_uniform_values(PGRAPHState *pg,
         pgraph_apply_scaling_factor(pg, &wscale, &hscale);
         values->surfaceScale[0][0] = wscale;
         values->surfaceScale[0][1] = hscale;
+    }
+
+    if (locs[PshUniform_surfaceClip] != -1) {
+        values->surfaceClip[0][0] = pg->surface_shape.clip_x;
+        values->surfaceClip[0][1] = pg->surface_shape.clip_y;
+        values->surfaceClip[0][2] = pg->surface_shape.clip_width;
+        values->surfaceClip[0][3] = pg->surface_shape.clip_height;
+    }
+
+    if (locs[PshUniform_stereoSplit] != -1) {
+        unsigned int width = pg->surface_binding_dim.width;
+        unsigned int height = pg->surface_binding_dim.height;
+        pgraph_apply_scaling_factor(pg, &width, &height);
+
+        values->stereoSplit[0][0] = pgraph_stereo_internal_vertical() ?
+                                        width :
+                                        (g_config.display.stereo
+                                             .full_framebuffer_per_eye ?
+                                             width : width / 2);
+        values->stereoSplit[0][1] = pgraph_stereo_internal_vertical() ?
+                                        (g_config.display.stereo
+                                             .full_framebuffer_per_eye ?
+                                             height : height / 2) :
+                                        height;
+    }
+
+    if (locs[PshUniform_surfaceSize] != -1) {
+        unsigned int aa_width = 1, aa_height = 1;
+        pgraph_apply_anti_aliasing_factor(pg, &aa_width, &aa_height);
+        values->surfaceSize[0][0] =
+            (float)pg->surface_binding_dim.width / aa_width;
+        values->surfaceSize[0][1] =
+            (float)pg->surface_binding_dim.height / aa_height;
+    }
+
+    if (locs[PshUniform_stereoConfig] != -1) {
+        float slot_scale_x, slot_scale_y;
+        pgraph_get_stereo_slot_scale(&slot_scale_x, &slot_scale_y);
+        values->stereoConfig[0][0] = pgraph_stereo_enabled() ? 1.0f : 0.0f;
+        values->stereoConfig[0][1] =
+            pgraph_stereo_internal_vertical() ? 1.0f : 0.0f;
+        values->stereoConfig[0][2] = slot_scale_x;
+        values->stereoConfig[0][3] = slot_scale_y;
     }
 
     unsigned int max_gl_width = pg->surface_binding_dim.width;

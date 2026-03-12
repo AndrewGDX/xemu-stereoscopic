@@ -231,6 +231,12 @@ void pgraph_init(NV2AState *d)
     pg->frame_time = 0;
     pg->draw_time = 0;
 
+    pg->applied_stereo_config.mode = g_config.display.stereo.mode;
+    pg->applied_stereo_config.full_framebuffer_per_eye =
+        g_config.display.stereo.full_framebuffer_per_eye;
+    pg->applied_stereo_config.flip_stereo_rendering =
+        g_config.display.stereo.flip_stereo_rendering;
+
     pg->material_alpha = 0.0f;
     PG_SET_MASK(NV_PGRAPH_CONTROL_3, NV_PGRAPH_CONTROL_3_SHADEMODE,
          NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH);
@@ -408,6 +414,136 @@ unsigned int nv2a_get_surface_scale_factor(void)
     bql_lock();
 
     return s;
+}
+
+static unsigned int pgraph_get_stereo_download_slot(void)
+{
+    return 0;
+}
+
+void pgraph_pack_stereo_buffer(PGRAPHState *pg, uint8_t *dst,
+                               const uint8_t *src, unsigned int mono_width,
+                               unsigned int mono_height,
+                               unsigned int bytes_per_pixel)
+{
+    (void)pg;
+
+    if (!pgraph_stereo_enabled()) {
+        memcpy(dst, src, mono_width * mono_height * bytes_per_pixel);
+        return;
+    }
+
+    unsigned int slot_widths[2] = { mono_width, mono_width };
+    unsigned int slot_heights[2] = { mono_height, mono_height };
+    if (!g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            slot_heights[0] = mono_height / 2;
+            slot_heights[1] = mono_height - slot_heights[0];
+        } else {
+            slot_widths[0] = mono_width / 2;
+            slot_widths[1] = mono_width - slot_widths[0];
+        }
+    }
+    unsigned int host_width = mono_width;
+    unsigned int host_height = mono_height;
+    if (g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            host_height *= 2;
+        } else {
+            host_width *= 2;
+        }
+    }
+
+    memset(dst, 0, host_width * host_height * bytes_per_pixel);
+
+    for (int slot = 0; slot < 2; slot++) {
+        unsigned int slot_offset_x =
+            pgraph_stereo_internal_vertical() ? 0 :
+                                                (slot ? slot_widths[0] : 0);
+        unsigned int slot_offset_y =
+            pgraph_stereo_internal_vertical() ? (slot ? slot_heights[0] : 0) :
+                                                0;
+        unsigned int slot_width = slot_widths[slot];
+        unsigned int slot_height = slot_heights[slot];
+
+        for (unsigned int y = 0; y < slot_height; y++) {
+            unsigned int src_y = MIN((unsigned int)((uint64_t)y * mono_height /
+                                                    MAX(slot_height, 1u)),
+                                     mono_height - 1);
+            for (unsigned int x = 0; x < slot_width; x++) {
+                unsigned int src_x = MIN((unsigned int)((uint64_t)x * mono_width /
+                                                        MAX(slot_width, 1u)),
+                                         mono_width - 1);
+                const uint8_t *src_px =
+                    src + (src_y * mono_width + src_x) * bytes_per_pixel;
+                uint8_t *dst_px = dst +
+                                  (((slot_offset_y + y) * host_width) +
+                                   slot_offset_x + x) * bytes_per_pixel;
+                memcpy(dst_px, src_px, bytes_per_pixel);
+            }
+        }
+    }
+}
+
+void pgraph_unpack_stereo_buffer(PGRAPHState *pg, uint8_t *dst,
+                                 const uint8_t *src,
+                                 unsigned int mono_width,
+                                 unsigned int mono_height,
+                                 unsigned int bytes_per_pixel)
+{
+    (void)pg;
+
+    if (!pgraph_stereo_enabled()) {
+        memcpy(dst, src, mono_width * mono_height * bytes_per_pixel);
+        return;
+    }
+
+    unsigned int slot_widths[2] = { mono_width, mono_width };
+    unsigned int slot_heights[2] = { mono_height, mono_height };
+    if (!g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            slot_heights[0] = mono_height / 2;
+            slot_heights[1] = mono_height - slot_heights[0];
+        } else {
+            slot_widths[0] = mono_width / 2;
+            slot_widths[1] = mono_width - slot_widths[0];
+        }
+    }
+    unsigned int host_width = mono_width;
+    unsigned int host_height = mono_height;
+    if (g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            host_height *= 2;
+        } else {
+            host_width *= 2;
+        }
+    }
+    unsigned int slot = pgraph_get_stereo_download_slot();
+    unsigned int slot_width = slot_widths[slot];
+    unsigned int slot_height = slot_heights[slot];
+    unsigned int slot_offset_x =
+        pgraph_stereo_internal_vertical() ? 0 : (slot ? slot_widths[0] : 0);
+    unsigned int slot_offset_y =
+        pgraph_stereo_internal_vertical() ? (slot ? slot_heights[0] : 0) : 0;
+
+    for (unsigned int y = 0; y < mono_height; y++) {
+        unsigned int src_y = slot_offset_y +
+                             MIN((unsigned int)((uint64_t)y * slot_height /
+                                                MAX(mono_height, 1u)),
+                                 slot_height - 1);
+        for (unsigned int x = 0; x < mono_width; x++) {
+            unsigned int src_x = slot_offset_x +
+                                 MIN((unsigned int)((uint64_t)x * slot_width /
+                                                    MAX(mono_width, 1u)),
+                                     slot_width - 1);
+            const uint8_t *src_px =
+                src + (src_y * host_width + src_x) *
+                          bytes_per_pixel;
+            uint8_t *dst_px =
+                dst + (y * mono_width + x) * bytes_per_pixel;
+            memcpy(dst_px, src_px, bytes_per_pixel);
+        }
+    }
 }
 
 #define METHOD_ADDR(gclass, name) \
@@ -3172,9 +3308,35 @@ static void do_wait_for_renderer_switch(CPUState *cpu, run_on_cpu_data data)
     qemu_event_wait(&d->pgraph.renderer_switch_complete);
 }
 
+static void pgraph_sync_stereo_config(PGRAPHState *pg)
+{
+    bool changed =
+        pg->applied_stereo_config.mode != g_config.display.stereo.mode ||
+        pg->applied_stereo_config.full_framebuffer_per_eye !=
+            g_config.display.stereo.full_framebuffer_per_eye ||
+        pg->applied_stereo_config.flip_stereo_rendering !=
+            g_config.display.stereo.flip_stereo_rendering;
+
+    if (!changed) {
+        return;
+    }
+
+    pg->applied_stereo_config.mode = g_config.display.stereo.mode;
+    pg->applied_stereo_config.full_framebuffer_per_eye =
+        g_config.display.stereo.full_framebuffer_per_eye;
+    pg->applied_stereo_config.flip_stereo_rendering =
+        g_config.display.stereo.flip_stereo_rendering;
+
+    if (!pg->flush_pending) {
+        qemu_event_reset(&pg->flush_complete);
+        pg->flush_pending = true;
+    }
+}
+
 void pgraph_process_pending(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+    pgraph_sync_stereo_config(pg);
     pg->renderer->ops.process_pending(d);
 
     if (g_config.display.renderer != pg->renderer->type &&

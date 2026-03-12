@@ -24,6 +24,68 @@
 #include "debug.h"
 #include "renderer.h"
 
+static unsigned int pgraph_gl_get_stereo_rects(PGRAPHState *pg,
+                                               unsigned int x,
+                                               unsigned int y,
+                                               unsigned int width,
+                                               unsigned int height,
+                                               GLint rects[2][4])
+{
+    if (!pgraph_stereo_enabled()) {
+        rects[0][0] = x;
+        rects[0][1] = y;
+        rects[0][2] = width;
+        rects[0][3] = height;
+        return 1;
+    }
+
+    unsigned int mono_width = pg->surface_binding_dim.width;
+    unsigned int mono_height = pg->surface_binding_dim.height;
+    pgraph_apply_scaling_factor(pg, &mono_width, &mono_height);
+
+    unsigned int slot_widths[2] = { mono_width, mono_width };
+    unsigned int slot_heights[2] = { mono_height, mono_height };
+    if (!g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            slot_heights[0] = mono_height / 2;
+            slot_heights[1] = mono_height - slot_heights[0];
+        } else {
+            slot_widths[0] = mono_width / 2;
+            slot_widths[1] = mono_width - slot_widths[0];
+        }
+    }
+
+    for (int slot = 0; slot < 2; slot++) {
+        unsigned int offset_x =
+            pgraph_stereo_internal_vertical() ? 0 : (slot ? slot_widths[0] : 0);
+        unsigned int offset_y =
+            pgraph_stereo_internal_vertical() ? (slot ? slot_heights[0] : 0) : 0;
+        unsigned int start_x = pgraph_stereo_internal_vertical() ?
+                                   x :
+                                   (uint64_t)x * slot_widths[slot] / mono_width;
+        unsigned int end_x = pgraph_stereo_internal_vertical() ?
+                                 x + width :
+                                 ((uint64_t)(x + width) * slot_widths[slot] +
+                                  mono_width - 1) /
+                                     mono_width;
+        unsigned int start_y = pgraph_stereo_internal_vertical() ?
+                                   (uint64_t)y * slot_heights[slot] / mono_height :
+                                   y;
+        unsigned int end_y = pgraph_stereo_internal_vertical() ?
+                                 ((uint64_t)(y + height) * slot_heights[slot] +
+                                  mono_height - 1) /
+                                     mono_height :
+                                 y + height;
+
+        rects[slot][0] = offset_x + start_x;
+        rects[slot][1] = offset_y + start_y;
+        rects[slot][2] = end_x - start_x;
+        rects[slot][3] = end_y - start_y;
+    }
+
+    return 2;
+}
+
 void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -103,10 +165,6 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
     pgraph_apply_scaling_factor(pg, &xmin, &ymin);
     pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
 
-    /* FIXME: Respect window clip?!?! */
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(xmin, ymin, scissor_width, scissor_height);
-
     /* Dither */
     /* FIXME: Maybe also disable it here? + GL implementation dependent */
     if (pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) & NV_PGRAPH_CONTROL_0_DITHERENABLE) {
@@ -115,7 +173,16 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
         glDisable(GL_DITHER);
     }
 
-    glClear(gl_mask);
+    /* FIXME: Respect window clip?!?! */
+    glEnable(GL_SCISSOR_TEST);
+    GLint rects[2][4];
+    unsigned int rect_count =
+        pgraph_gl_get_stereo_rects(pg, xmin, ymin, scissor_width,
+                                   scissor_height, rects);
+    for (int i = 0; i < rect_count; i++) {
+        glScissor(rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
+        glClear(gl_mask);
+    }
 
     glDisable(GL_SCISSOR_TEST);
 
@@ -296,7 +363,7 @@ void pgraph_gl_draw_begin(NV2AState *d)
 
     unsigned int vp_width = pg->surface_binding_dim.width,
                  vp_height = pg->surface_binding_dim.height;
-    pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
+    pgraph_apply_host_scaling_factor(pg, &vp_width, &vp_height);
     glViewport(0, 0, vp_width, vp_height);
 
     /* Surface clip */
@@ -311,6 +378,13 @@ void pgraph_gl_draw_begin(NV2AState *d)
     pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
     pgraph_apply_scaling_factor(pg, &xmin, &ymin);
     pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+
+    if (pgraph_stereo_enabled()) {
+        xmin = 0;
+        ymin = 0;
+        scissor_width = vp_width;
+        scissor_height = vp_height;
+    }
 
     glEnable(GL_SCISSOR_TEST);
     glScissor(xmin, ymin, scissor_width, scissor_height);
@@ -388,6 +462,8 @@ void pgraph_gl_flush_draw(NV2AState *d)
     }
     assert(r->shader_binding);
 
+    unsigned int instance_count = pgraph_stereo_instance_count();
+
     if (pg->draw_arrays_length) {
         NV2A_GL_DPRINTF(false, "Draw Arrays");
         nv2a_profile_inc_counter(NV2A_PROF_DRAW_ARRAYS);
@@ -399,10 +475,19 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                       pg->draw_arrays_max_count - 1,
                                       false, 0,
                                       pg->draw_arrays_max_count - 1);
-        glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
-                          pg->draw_arrays_start,
-                          pg->draw_arrays_count,
-                          pg->draw_arrays_length);
+        if (instance_count == 1) {
+            glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
+                              pg->draw_arrays_start,
+                              pg->draw_arrays_count,
+                              pg->draw_arrays_length);
+        } else {
+            for (int i = 0; i < pg->draw_arrays_length; i++) {
+                glDrawArraysInstanced(r->shader_binding->gl_primitive_mode,
+                                      pg->draw_arrays_start[i],
+                                      pg->draw_arrays_count[i],
+                                      instance_count);
+            }
+        }
     } else if (pg->inline_elements_length) {
         NV2A_GL_DPRINTF(false, "Inline Elements");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);
@@ -441,9 +526,9 @@ void pgraph_gl_flush_draw(NV2AState *d)
         } else {
             nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY);
         }
-        glDrawElements(r->shader_binding->gl_primitive_mode,
-                       pg->inline_elements_length, GL_UNSIGNED_INT,
-                       (void *)0);
+        glDrawElementsInstanced(r->shader_binding->gl_primitive_mode,
+                                pg->inline_elements_length, GL_UNSIGNED_INT,
+                                (void *)0, instance_count);
     } else if (pg->inline_buffer_length) {
         NV2A_GL_DPRINTF(false, "Inline Buffer");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_BUFFERS);
@@ -474,15 +559,15 @@ void pgraph_gl_flush_draw(NV2AState *d)
             }
         }
 
-        glDrawArrays(r->shader_binding->gl_primitive_mode,
-                     0, pg->inline_buffer_length);
+        glDrawArraysInstanced(r->shader_binding->gl_primitive_mode,
+                              0, pg->inline_buffer_length, instance_count);
     } else if (pg->inline_array_length) {
         NV2A_GL_DPRINTF(false, "Inline Array");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ARRAYS);
 
         unsigned int index_count = pgraph_gl_bind_inline_array(d);
-        glDrawArrays(r->shader_binding->gl_primitive_mode,
-                     0, index_count);
+        glDrawArraysInstanced(r->shader_binding->gl_primitive_mode,
+                              0, index_count, instance_count);
     } else {
         NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
         NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");

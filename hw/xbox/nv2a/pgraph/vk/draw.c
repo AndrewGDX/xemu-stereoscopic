@@ -371,6 +371,68 @@ static VkRenderPass get_render_pass(PGRAPHVkState *r, RenderPassState *state)
     return add_new_render_pass(r, state);
 }
 
+static unsigned int pgraph_vk_get_stereo_rects(PGRAPHState *pg,
+                                               unsigned int x,
+                                               unsigned int y,
+                                               unsigned int width,
+                                               unsigned int height,
+                                               VkRect2D rects[2])
+{
+    if (!pgraph_stereo_enabled()) {
+        rects[0] = (VkRect2D){
+            .offset = { .x = x, .y = y },
+            .extent = { .width = width, .height = height },
+        };
+        return 1;
+    }
+
+    unsigned int mono_width = pg->surface_binding_dim.width;
+    unsigned int mono_height = pg->surface_binding_dim.height;
+    pgraph_apply_scaling_factor(pg, &mono_width, &mono_height);
+
+    unsigned int slot_widths[2] = { mono_width, mono_width };
+    unsigned int slot_heights[2] = { mono_height, mono_height };
+    if (!g_config.display.stereo.full_framebuffer_per_eye) {
+        if (pgraph_stereo_internal_vertical()) {
+            slot_heights[0] = mono_height / 2;
+            slot_heights[1] = mono_height - slot_heights[0];
+        } else {
+            slot_widths[0] = mono_width / 2;
+            slot_widths[1] = mono_width - slot_widths[0];
+        }
+    }
+
+    for (int slot = 0; slot < 2; slot++) {
+        unsigned int offset_x =
+            pgraph_stereo_internal_vertical() ? 0 : (slot ? slot_widths[0] : 0);
+        unsigned int offset_y =
+            pgraph_stereo_internal_vertical() ? (slot ? slot_heights[0] : 0) : 0;
+        unsigned int start_x = pgraph_stereo_internal_vertical() ?
+                                   x :
+                                   (uint64_t)x * slot_widths[slot] / mono_width;
+        unsigned int end_x = pgraph_stereo_internal_vertical() ?
+                                 x + width :
+                                 ((uint64_t)(x + width) * slot_widths[slot] +
+                                  mono_width - 1) /
+                                     mono_width;
+        unsigned int start_y = pgraph_stereo_internal_vertical() ?
+                                   (uint64_t)y * slot_heights[slot] / mono_height :
+                                   y;
+        unsigned int end_y = pgraph_stereo_internal_vertical() ?
+                                 ((uint64_t)(y + height) * slot_heights[slot] +
+                                  mono_height - 1) /
+                                     mono_height :
+                                 y + height;
+
+        rects[slot] = (VkRect2D){
+            .offset = { .x = offset_x + start_x, .y = offset_y + start_y },
+            .extent = { .width = end_x - start_x, .height = end_y - start_y },
+        };
+    }
+
+    return 2;
+}
+
 static void create_frame_buffer(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -404,7 +466,8 @@ static void create_frame_buffer(PGRAPHState *pg)
         .height = binding->height,
         .layers = 1,
     };
-    pgraph_apply_scaling_factor(pg, &create_info.width, &create_info.height);
+    pgraph_apply_host_scaling_factor(pg, &create_info.width,
+                                     &create_info.height);
     VK_CHECK(vkCreateFramebuffer(r->device, &create_info, NULL,
                                  &r->framebuffers[r->framebuffer_index++]));
 }
@@ -1171,7 +1234,7 @@ static void begin_render_pass(PGRAPHState *pg)
 
     unsigned int vp_width = pg->surface_binding_dim.width,
                  vp_height = pg->surface_binding_dim.height;
-    pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
+    pgraph_apply_host_scaling_factor(pg, &vp_width, &vp_height);
 
     assert(r->framebuffer_index > 0);
 
@@ -1443,7 +1506,7 @@ static void begin_draw(PGRAPHState *pg)
 
         unsigned int vp_width = pg->surface_binding_dim.width,
                      vp_height = pg->surface_binding_dim.height;
-        pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
+        pgraph_apply_host_scaling_factor(pg, &vp_width, &vp_height);
 
         VkViewport viewport = {
             .width = vp_width,
@@ -1466,6 +1529,13 @@ static void begin_draw(PGRAPHState *pg)
 
         pgraph_apply_scaling_factor(pg, &xmin, &ymin);
         pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+
+        if (pgraph_stereo_enabled()) {
+            xmin = 0;
+            ymin = 0;
+            scissor_width = vp_width;
+            scissor_height = vp_height;
+        }
 
         VkRect2D scissor = {
             .offset.x = xmin,
@@ -1699,14 +1769,18 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
     pgraph_apply_scaling_factor(pg, &xmin, &ymin);
     pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
 
-    VkClearRect clear_rect = {
-        .rect = {
-            .offset = { .x = xmin, .y = ymin },
-            .extent = { .width = scissor_width, .height = scissor_height },
-        },
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
+    VkRect2D stereo_rects[2];
+    unsigned int rect_count =
+        pgraph_vk_get_stereo_rects(pg, xmin, ymin, scissor_width,
+                                   scissor_height, stereo_rects);
+    VkClearRect clear_rects[2];
+    for (int i = 0; i < rect_count; i++) {
+        clear_rects[i] = (VkClearRect){
+            .rect = stereo_rects[i],
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+    }
 
     int num_attachments = 0;
     VkClearAttachment attachments[2];
@@ -1728,9 +1802,11 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
         } else {
             float blend_constants[4];
             pgraph_get_clear_color(pg, blend_constants);
-            vkCmdSetScissor(r->command_buffer, 0, 1, &clear_rect.rect);
             vkCmdSetBlendConstants(r->command_buffer, blend_constants);
-            vkCmdDraw(r->command_buffer, 3, 1, 0, 0);
+            for (int i = 0; i < rect_count; i++) {
+                vkCmdSetScissor(r->command_buffer, 0, 1, &stereo_rects[i]);
+                vkCmdDraw(r->command_buffer, 3, 1, 0, 0);
+            }
         }
     }
 
@@ -1757,7 +1833,7 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
 
     if (num_attachments) {
         vkCmdClearAttachments(r->command_buffer, num_attachments, attachments,
-                              1, &clear_rect);
+                              rect_count, clear_rects);
     }
     end_draw(pg);
     pgraph_vk_end_debug_marker(r, r->command_buffer);
@@ -2060,7 +2136,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
             uint32_t start = pg->draw_arrays_start[i],
                      count = pg->draw_arrays_count[i];
             NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
-            vkCmdDraw(r->command_buffer, count, 1, start, 0);
+            vkCmdDraw(r->command_buffer, count, pgraph_stereo_instance_count(),
+                      start, 0);
         }
         end_draw(pg);
         pgraph_vk_end_debug_marker(r, r->command_buffer);
@@ -2101,8 +2178,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
         vkCmdBindIndexBuffer(r->command_buffer,
                              r->storage_buffers[BUFFER_INDEX].buffer,
                              buffer_offset, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(r->command_buffer, pg->inline_elements_length, 1, 0, 0,
-                         0);
+        vkCmdDrawIndexed(r->command_buffer, pg->inline_elements_length,
+                         pgraph_stereo_instance_count(), 0, 0, 0);
         end_draw(pg);
         pgraph_vk_end_debug_marker(r, r->command_buffer);
 
@@ -2139,7 +2216,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                      "Inline Buffer");
         begin_draw(pg);
         bind_inline_vertex_buffer(pg, buffer_offset);
-        vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
+        vkCmdDraw(r->command_buffer, pg->inline_buffer_length,
+                  pgraph_stereo_instance_count(), 0, 0);
         end_draw(pg);
         pgraph_vk_end_debug_marker(r, r->command_buffer);
 
@@ -2183,7 +2261,8 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                      "Inline Array");
         begin_draw(pg);
         bind_inline_vertex_buffer(pg, buffer_offset);
-        vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
+        vkCmdDraw(r->command_buffer, index_count,
+                  pgraph_stereo_instance_count(), 0, 0);
         end_draw(pg);
         pgraph_vk_end_debug_marker(r, r->command_buffer);
         NV2A_VK_DGROUP_END();

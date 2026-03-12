@@ -62,16 +62,60 @@ void pgraph_gl_init_display(NV2AState *d)
         "uniform bool pvideo_color_key_enable;\n"
         "uniform vec3 pvideo_color_key;\n"
         "uniform vec2 display_size;\n"
+        "uniform vec2 source_display_size;\n"
         "uniform float line_offset;\n"
+        "uniform int stereo_mode;\n"
+        "uniform bool stereo_vertical;\n"
+        "uniform int left_eye_slot;\n"
+        "uniform vec2 stereo_slot_scale;\n"
         "layout(location = 0) out vec4 out_Color;\n"
+        "vec2 get_eye_coord(out int eye)\n"
+        "{\n"
+        "    vec2 coord = gl_FragCoord.xy;\n"
+        "    eye = 0;\n"
+        "    if (stereo_mode == 1) {\n"
+        "        float half_width = display_size.x * 0.5;\n"
+        "        eye = coord.x >= half_width ? 1 : 0;\n"
+        "        coord.x = (coord.x - float(eye) * half_width) * source_display_size.x / half_width;\n"
+        "        coord.y = coord.y * source_display_size.y / display_size.y;\n"
+        "    } else if (stereo_mode == 2) {\n"
+        "        float half_height = display_size.y * 0.5;\n"
+        "        eye = coord.y >= half_height ? 0 : 1;\n"
+        "        coord.y = (coord.y - (eye == 0 ? half_height : 0.0)) * source_display_size.y / half_height;\n"
+        "        coord.x = coord.x * source_display_size.x / display_size.x;\n"
+        "    }\n"
+        "    return coord;\n"
+        "}\n"
+        "vec2 get_tex_coord(vec2 eye_coord, int eye)\n"
+        "{\n"
+        "    vec2 eye_norm = eye_coord / source_display_size;\n"
+        "    vec2 tex_coord = vec2(0.0);\n"
+        "    float x_scale = source_display_size.x / textureSize(tex, 0).x;\n"
+        "    float y_scale = source_display_size.y / textureSize(tex, 0).y / line_offset;\n"
+        "    if (stereo_mode == 0) {\n"
+        "        tex_coord.x = eye_norm.x * x_scale;\n"
+        "        tex_coord.y = (1.0 - eye_norm.y) * y_scale;\n"
+        "        return tex_coord;\n"
+        "    }\n"
+        "    int slot = eye == 0 ? left_eye_slot : 1 - left_eye_slot;\n"
+        "    if (stereo_vertical) {\n"
+        "        tex_coord.x = eye_norm.x * x_scale;\n"
+        "        tex_coord.y = (1.0 - eye_norm.y) * y_scale * stereo_slot_scale.y +\n"
+        "                      float(slot) * stereo_slot_scale.y;\n"
+        "    } else {\n"
+        "        tex_coord.x = eye_norm.x * x_scale * stereo_slot_scale.x +\n"
+        "                      float(slot) * stereo_slot_scale.x;\n"
+        "        tex_coord.y = (1.0 - eye_norm.y) * y_scale;\n"
+        "    }\n"
+        "    return tex_coord;\n"
+        "}\n"
         "void main()\n"
         "{\n"
-        "    vec2 texCoord = gl_FragCoord.xy/display_size;\n"
-        "    float rel = display_size.y/textureSize(tex, 0).y/line_offset;\n"
-        "    texCoord.y = rel*(1.0f - texCoord.y);\n"
-        "    out_Color.rgba = texture(tex, texCoord);\n"
+        "    int eye = 0;\n"
+        "    vec2 eye_coord = get_eye_coord(eye);\n"
+        "    out_Color.rgba = texture(tex, get_tex_coord(eye_coord, eye));\n"
         "    if (pvideo_enable) {\n"
-        "        vec2 screenCoord = gl_FragCoord.xy - 0.5;\n"
+        "        vec2 screenCoord = eye_coord - 0.5;\n"
         "        vec4 output_region = vec4(pvideo_pos.xy, pvideo_pos.xy + pvideo_pos.zw);\n"
         "        bvec4 clip = bvec4(lessThan(screenCoord, output_region.xy),\n"
         "                           greaterThan(screenCoord, output_region.zw));\n"
@@ -94,7 +138,12 @@ void pgraph_gl_init_display(NV2AState *d)
     r->disp_rndr.pvideo_color_key_enable_loc = glGetUniformLocation(r->disp_rndr.prog, "pvideo_color_key_enable");
     r->disp_rndr.pvideo_color_key_loc = glGetUniformLocation(r->disp_rndr.prog, "pvideo_color_key");
     r->disp_rndr.display_size_loc = glGetUniformLocation(r->disp_rndr.prog, "display_size");
+    r->disp_rndr.source_display_size_loc = glGetUniformLocation(r->disp_rndr.prog, "source_display_size");
     r->disp_rndr.line_offset_loc = glGetUniformLocation(r->disp_rndr.prog, "line_offset");
+    r->disp_rndr.stereo_mode_loc = glGetUniformLocation(r->disp_rndr.prog, "stereo_mode");
+    r->disp_rndr.stereo_vertical_loc = glGetUniformLocation(r->disp_rndr.prog, "stereo_vertical");
+    r->disp_rndr.left_eye_slot_loc = glGetUniformLocation(r->disp_rndr.prog, "left_eye_slot");
+    r->disp_rndr.stereo_slot_scale_loc = glGetUniformLocation(r->disp_rndr.prog, "stereo_slot_scale");
 
     glGenVertexArrays(1, &r->disp_rndr.vao);
     glBindVertexArray(r->disp_rndr.vao);
@@ -292,7 +341,10 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
         height *= 2;
     }
 
-    pgraph_apply_scaling_factor(pg, &width, &height);
+    unsigned int source_width = width;
+    unsigned int source_height = height;
+    pgraph_get_display_output_size(pg, &width, &height);
+    pgraph_apply_display_scaling_factor(pg, &source_width, &source_height);
 
     glBindFramebuffer(GL_FRAMEBUFFER, r->disp_rndr.fbo);
     glActiveTexture(GL_TEXTURE0);
@@ -344,7 +396,19 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     glUseProgram(r->disp_rndr.prog);
     glProgramUniform1i(r->disp_rndr.prog, r->disp_rndr.tex_loc, 0);
     glUniform2f(r->disp_rndr.display_size_loc, width, height);
+    glUniform2f(r->disp_rndr.source_display_size_loc, source_width,
+                source_height);
     glUniform1f(r->disp_rndr.line_offset_loc, line_offset);
+    glUniform1i(r->disp_rndr.stereo_mode_loc,
+                g_config.display.stereo.mode);
+    glUniform1i(r->disp_rndr.stereo_vertical_loc,
+                pgraph_stereo_internal_vertical());
+    glUniform1i(r->disp_rndr.left_eye_slot_loc,
+                pgraph_stereo_effective_swap_eyes() ? 1 : 0);
+    float stereo_slot_scale_x, stereo_slot_scale_y;
+    pgraph_get_stereo_slot_scale(&stereo_slot_scale_x, &stereo_slot_scale_y);
+    glUniform2f(r->disp_rndr.stereo_slot_scale_loc, stereo_slot_scale_x,
+                stereo_slot_scale_y);
     render_display_pvideo_overlay(d);
 
     glViewport(0, 0, width, height);

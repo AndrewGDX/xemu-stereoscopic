@@ -352,12 +352,13 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
         "  vtxT1 = v_vtxT1[index];\n"
         "  vtxT2 = v_vtxT2[index];\n"
         "  vtxT3 = v_vtxT3[index];\n"
-        "  vtxPos0 = pz[0];\n"
-        "  vtxPos1 = pz[1];\n"
-        "  vtxPos2 = pz[2];\n"
-        "  triMZ = (isnan(pz[3].x) || isinf(pz[3].x)) ? 0.0 : pz[3].x;\n"
-        "  EmitVertex();\n"
-        "}\n",
+         "  vtxPos0 = pz[0];\n"
+         "  vtxPos1 = pz[1];\n"
+         "  vtxPos2 = pz[2];\n"
+         "  triMZ = (isnan(pz[3].x) || isinf(pz[3].x)) ? 0.0 : pz[3].x;\n"
+         "  stereoSlot = v_stereoSlot[index];\n"
+         "  EmitVertex();\n"
+         "}\n",
         provoking_index,
         provoking_index,
         provoking_index,

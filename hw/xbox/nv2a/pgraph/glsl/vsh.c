@@ -250,8 +250,11 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
                        "#define vtxPos1 v_vtxPos1\n"
                        "#define vtxPos2 v_vtxPos2\n"
                        "#define triMZ v_triMZ\n"
+                       "#define stereoSlot v_stereoSlot\n"
                        );
     }
+    mstring_append_fmt(header, "#define stereoInstance %s\n",
+                       opts.vulkan ? "gl_InstanceIndex" : "gl_InstanceID");
     mstring_append(header, "\n");
 
     int num_uniform_attrs = 0;
@@ -441,6 +444,50 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
         );
     }
 
+    mstring_append(body,
+                   "  stereoSlot = 0;\n"
+                   "  if (stereoControl.x != 0) {\n"
+                   "    int slot = stereoInstance;\n"
+                   "    stereoSlot = slot;\n"
+                   "    int eye = slot;\n"
+                   "    if (stereoControl.z != 0) {\n"
+                   "      eye = 1 - eye;\n"
+                   "    }\n"
+                   "    float eyeScale = 1.0;\n"
+                   "    if (stereoControl.w == 1) {\n"
+                   "      eyeScale = (eye == 0) ? 2.0 : 0.0;\n"
+                   "    } else if (stereoControl.w == 2) {\n"
+                   "      eyeScale = (eye == 1) ? 2.0 : 0.0;\n"
+                   "    }\n"
+                   "    float eyeSign = (eye == 0) ? -1.0 : 1.0;\n"
+                   "    float ndcDepth = gl_Position.z / max(abs(gl_Position.w), 0.000001);\n");
+
+    if (!opts.vulkan) {
+        mstring_append(body, "    ndcDepth = ndcDepth * 0.5 + 0.5;\n");
+    }
+
+    mstring_append(body,
+                   "    float uiThreshold = stereoParams[1].x;\n"
+                   "    float depthWeight = 1.0 - ndcDepth;\n"
+                   "    float uiHint = abs(vtxPos.w - 1.0);\n"
+                   "    if (uiHint <= 0.25 && ndcDepth <= uiThreshold) {\n"
+                   "      depthWeight = stereoParams[0].z;\n"
+                   "    } else if (uiHint <= 0.5 && ndcDepth <= uiThreshold * 2.0) {\n"
+                   "      depthWeight = stereoParams[0].w;\n"
+                   "    }\n"
+                   "    float eyeOffset = clamp(stereoParams[0].x * eyeScale * eyeSign *\n"
+                   "                            (depthWeight - stereoParams[0].y),\n"
+                   "                            -0.5, 0.5);\n"
+                   "    gl_Position.x -= eyeOffset * gl_Position.w;\n"
+                   "    if (stereoControl.y != 0) {\n"
+                   "      gl_Position.y = gl_Position.y * 0.5 +\n"
+                   "                      ((slot == 0) ? 0.5 : -0.5) * gl_Position.w;\n"
+                   "    } else {\n"
+                   "      gl_Position.x = gl_Position.x * 0.5 +\n"
+                   "                      ((slot == 0) ? -0.5 : 0.5) * gl_Position.w;\n"
+                   "    }\n"
+                   "  }\n");
+
     mstring_append(body, "}\n");
 
     /* Return combined header + source */
@@ -521,6 +568,30 @@ void pgraph_glsl_set_vsh_uniform_values(PGRAPHState *pg, const VshState *state,
         float height = (float)pg->surface_binding_dim.height / aa_height;
         values->surfaceSize[0][0] = width;
         values->surfaceSize[0][1] = height;
+    }
+
+    if (locs[VshUniform_stereoControl] != -1) {
+        values->stereoControl[0][0] = pgraph_stereo_enabled() ? 1 : 0;
+        values->stereoControl[0][1] = pgraph_stereo_internal_vertical() ? 1 : 0;
+        values->stereoControl[0][2] =
+            pgraph_stereo_effective_swap_eyes() ? 1 : 0;
+        values->stereoControl[0][3] = g_config.display.stereo.dominant_eye;
+    }
+
+    if (locs[VshUniform_stereoParams] != -1) {
+        values->stereoParams[0][0] = g_config.display.stereo.separation * 0.002f;
+        values->stereoParams[0][1] =
+            g_config.display.stereo.convergence * 0.001f;
+        values->stereoParams[0][2] =
+            1.0f + g_config.display.stereo.ui_depth * 0.02f;
+        values->stereoParams[0][3] =
+            1.0f + g_config.display.stereo.ui_second_layer_depth * 0.02f;
+
+        values->stereoParams[1][0] =
+            g_config.display.stereo.ui_detection_threshold * 0.001f;
+        values->stereoParams[1][1] = 0.0f;
+        values->stereoParams[1][2] = 0.0f;
+        values->stereoParams[1][3] = 0.0f;
     }
 
     if (state->is_fixed_function) {

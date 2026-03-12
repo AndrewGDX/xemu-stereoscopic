@@ -208,6 +208,11 @@ static const char *display_frag_glsl =
     "layout(push_constant, std430) uniform PushConstants {\n"
     "    float line_offset;\n"
     "    vec2 display_size;\n"
+    "    vec2 source_display_size;\n"
+    "    int stereo_mode;\n"
+    "    bool stereo_vertical;\n"
+    "    int left_eye_slot;\n"
+    "    vec2 stereo_slot_scale;\n"
     "    bool pvideo_enable;\n"
     "    vec2 pvideo_in_pos;\n"
     "    vec4 pvideo_pos;\n"
@@ -216,15 +221,53 @@ static const char *display_frag_glsl =
     "    vec3 pvideo_color_key;\n"
     "};\n"
     "layout(location = 0) out vec4 out_Color;\n"
+    "vec2 get_eye_coord(out int eye)\n"
+    "{\n"
+    "    vec2 coord = vec2(gl_FragCoord.x, display_size.y - gl_FragCoord.y);\n"
+    "    eye = 0;\n"
+    "    if (stereo_mode == 1) {\n"
+    "        float half_width = display_size.x * 0.5;\n"
+    "        eye = coord.x >= half_width ? 1 : 0;\n"
+    "        coord.x = (coord.x - float(eye) * half_width) * source_display_size.x / half_width;\n"
+    "        coord.y = coord.y * source_display_size.y / display_size.y;\n"
+    "    } else if (stereo_mode == 2) {\n"
+    "        float half_height = display_size.y * 0.5;\n"
+    "        eye = coord.y >= half_height ? 0 : 1;\n"
+    "        coord.y = (coord.y - (eye == 0 ? half_height : 0.0)) * source_display_size.y / half_height;\n"
+    "        coord.x = coord.x * source_display_size.x / display_size.x;\n"
+    "    }\n"
+    "    return coord;\n"
+    "}\n"
+    "vec2 get_tex_coord(vec2 eye_coord, int eye)\n"
+    "{\n"
+    "    vec2 eye_norm = eye_coord / source_display_size;\n"
+    "    vec2 tex_coord = vec2(0.0);\n"
+    "    float x_scale = source_display_size.x / textureSize(tex, 0).x;\n"
+    "    float y_scale = source_display_size.y / textureSize(tex, 0).y / line_offset;\n"
+    "    if (stereo_mode == 0) {\n"
+    "        tex_coord.x = eye_norm.x * x_scale;\n"
+    "        tex_coord.y = eye_norm.y * y_scale;\n"
+    "        return tex_coord;\n"
+    "    }\n"
+    "    int slot = eye == 0 ? left_eye_slot : 1 - left_eye_slot;\n"
+    "    if (stereo_vertical) {\n"
+    "        tex_coord.x = eye_norm.x * x_scale;\n"
+    "        tex_coord.y = eye_norm.y * y_scale * stereo_slot_scale.y +\n"
+    "                      float(slot) * stereo_slot_scale.y;\n"
+    "    } else {\n"
+    "        tex_coord.x = eye_norm.x * x_scale * stereo_slot_scale.x +\n"
+    "                      float(slot) * stereo_slot_scale.x;\n"
+    "        tex_coord.y = eye_norm.y * y_scale;\n"
+    "    }\n"
+    "    return tex_coord;\n"
+    "}\n"
     "void main()\n"
     "{\n"
-    "    vec2 tex_coord = gl_FragCoord.xy/display_size;\n"
-    "    float rel = display_size.y/textureSize(tex, 0).y/line_offset;\n"
-    "    tex_coord.y = 1 + rel*(tex_coord.y - 1);\n"
-    "    tex_coord.y = 1 - tex_coord.y;\n" // GL compat
-    "    out_Color.rgba = texture(tex, tex_coord);\n"
+    "    int eye = 0;\n"
+    "    vec2 eye_coord = get_eye_coord(eye);\n"
+    "    out_Color.rgba = texture(tex, get_tex_coord(eye_coord, eye));\n"
     "    if (pvideo_enable) {\n"
-    "        vec2 screen_coord = vec2(gl_FragCoord.x, display_size.y - gl_FragCoord.y) * pvideo_scale.z;\n"
+    "        vec2 screen_coord = eye_coord * pvideo_scale.z;\n"
     "        vec4 output_region = vec4(pvideo_pos.xy, pvideo_pos.xy + pvideo_pos.zw);\n"
     "        bvec4 clip = bvec4(lessThan(screen_coord, output_region.xy),\n"
     "                           greaterThan(screen_coord, output_region.zw));\n"
@@ -868,6 +911,27 @@ static void update_uniforms(PGRAPHState *pg, SurfaceBinding *surface)
     int display_size_loc = uniform_index(l, "display_size");  // FIXME: Cache
     uniform2f(l, display_size_loc, r->display.width, r->display.height);
 
+    int source_display_size_loc = uniform_index(l, "source_display_size");
+    unsigned int source_width = r->display.width;
+    unsigned int source_height = r->display.height;
+    if (g_config.display.stereo.mode == CONFIG_DISPLAY_STEREO_MODE_SIDE_BY_SIDE &&
+        g_config.display.stereo.sbs_aspect_mode ==
+            CONFIG_DISPLAY_STEREO_SBS_ASPECT_MODE_FULL) {
+        source_width /= 2;
+    }
+    uniform2f(l, source_display_size_loc, source_width, source_height);
+
+    uniform1i(l, uniform_index(l, "stereo_mode"),
+              g_config.display.stereo.mode);
+    uniform1i(l, uniform_index(l, "stereo_vertical"),
+              pgraph_stereo_internal_vertical());
+    uniform1i(l, uniform_index(l, "left_eye_slot"),
+              pgraph_stereo_effective_swap_eyes() ? 1 : 0);
+    float stereo_slot_scale_x, stereo_slot_scale_y;
+    pgraph_get_stereo_slot_scale(&stereo_slot_scale_x, &stereo_slot_scale_y);
+    uniform2f(l, uniform_index(l, "stereo_slot_scale"), stereo_slot_scale_x,
+              stereo_slot_scale_y);
+
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
     int line_offset = vga_display_params.line_offset ?
@@ -1082,7 +1146,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         height *= 2;
     }
 
-    pgraph_apply_scaling_factor(pg, &width, &height);
+    pgraph_get_display_output_size(pg, &width, &height);
 
     PGRAPHVkDisplayState *disp = &r->display;
     if (!disp->image || disp->width != width || disp->height != height) {
