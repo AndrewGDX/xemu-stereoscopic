@@ -207,6 +207,8 @@ for opt do
   ;;
   --objcc=*) objcc="$optarg"
   ;;
+  --objcpp=*) objcpp="$optarg"
+  ;;
   --rustc=*) RUSTC="$optarg"
   ;;
   --rustdoc=*) RUSTDOC="$optarg"
@@ -306,6 +308,21 @@ if test -z "${objcc}${cross_prefix}"; then
   fi
 else
   objcc="${objcc-${cross_prefix}clang}"
+fi
+
+# Preferred ObjC++ compiler:
+# $objcpp (if set, i.e. via --objcpp option)
+# ${cross_prefix}clang++ (if cross-prefix specified)
+# clang++ (if available)
+# $cxx
+if test -z "${objcpp}${cross_prefix}"; then
+  if has clang++; then
+    objcpp=clang++
+  else
+    objcpp="$cxx"
+  fi
+else
+  objcpp="${objcpp-${cross_prefix}clang++}"
 fi
 
 ar="${AR-${cross_prefix}ar}"
@@ -877,6 +894,7 @@ Advanced options (experts only):
                            at build time [$host_cc]
   --cxx=CXX                use C++ compiler CXX [$cxx]
   --objcc=OBJCC            use Objective-C compiler OBJCC [$objcc]
+  --objcpp=OBJCPP          use Objective-C++ compiler OBJCPP [$objcpp]
   --rustc=RUSTC            use Rust compiler RUSTC [$rustc]
   --rustdoc=RUSTDOC        use rustdoc binary RUSTDOC [$rustdoc]
   --extra-cflags=CFLAGS    append extra C compiler flags CFLAGS
@@ -1916,6 +1934,7 @@ if test "$skip_meson" = no; then
   echo "c = [$(meson_quote $cc $CPU_CFLAGS)]" >> $cross
   test -n "$cxx" && echo "cpp = [$(meson_quote $cxx $CPU_CFLAGS)]" >> $cross
   test -n "$objcc" && echo "objc = [$(meson_quote $objcc $CPU_CFLAGS)]" >> $cross
+  test -n "$objcpp" && echo "objcpp = [$(meson_quote $objcpp $CPU_CFLAGS)]" >> $cross
   if test "$rust" != disabled; then
     if test "$rust_host_triple" != "$rust_target_triple"; then
       echo "rust = [$(meson_quote $rustc --target "$rust_target_triple")]" >> $cross

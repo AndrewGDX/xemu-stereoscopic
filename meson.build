@@ -86,6 +86,11 @@ if host_os == 'darwin' and \
   all_languages += ['objc']
   objc = meson.get_compiler('objc')
 endif
+if host_os == 'darwin' and \
+   add_languages('objcpp', required: true, native: false)
+  all_languages += ['objcpp']
+  objcpp = meson.get_compiler('objcpp')
+endif
 
 have_rust = add_languages('rust', native: false,
     required: get_option('rust').disable_auto_if(not have_system))
@@ -2396,6 +2401,11 @@ if vulkan.found()
                                      dependencies: vulkan)
 endif
 
+metal = not_found
+if host_os == 'darwin'
+  metal = dependency('appleframeworks', modules: 'Metal')
+endif
+
 if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
@@ -2666,6 +2676,7 @@ if numa.found()
 endif
 config_host_data.set('CONFIG_OPENGL', opengl.found())
 config_host_data.set('CONFIG_VULKAN', vulkan.found())
+config_host_data.set('CONFIG_METAL', metal.found())
 config_host_data.set('CONFIG_PLUGIN', get_option('plugins'))
 config_host_data.set('CONFIG_RBD', rbd.found())
 config_host_data.set('CONFIG_RDMA', rdma.found())

@@ -26,6 +26,7 @@
 #include "viewport-manager.hh"
 #include "xemu-hud.h"
 #include "misc.hh"
+#include "renderer-options.hh"
 #include "gl-helpers.hh"
 #include "reporting.hh"
 #include "qapi/error.h"
@@ -740,14 +741,8 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
 void MainMenuDisplayView::Draw()
 {
     SectionTitle("Renderer");
-    ChevronCombo("Backend", &g_config.display.renderer,
-                 "Null\0"
-                 "OpenGL\0"
-#ifdef CONFIG_VULKAN
-                 "Vulkan\0"
-#endif
-                 ,
-                 "Select desired renderer implementation");
+    DisplayRendererChevronCombo("Backend", &g_config.display.renderer,
+                                "Select desired renderer implementation");
     int rendering_scale = nv2a_get_surface_scale_factor() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"

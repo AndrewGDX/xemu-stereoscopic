@@ -21,6 +21,7 @@
 #include "main-menu.hh"
 #include "menubar.hh"
 #include "misc.hh"
+#include "renderer-options.hh"
 #include "widgets.hh"
 #include "monitor.hh"
 #include "debug.hh"
@@ -175,13 +176,7 @@ void ShowMainMenu()
                 }
             }
 
-            ImGui::Combo("Backend", &g_config.display.renderer,
-                 "Null\0"
-                 "OpenGL\0"
-#ifdef CONFIG_VULKAN
-                 "Vulkan\0"
-#endif
-                );
+            DisplayRendererCombo("Backend", &g_config.display.renderer);
 
             int rendering_scale = nv2a_get_surface_scale_factor() - 1;
             if (ImGui::Combo("Int. Resolution Scale", &rendering_scale,
