@@ -83,6 +83,13 @@ struct xemu_console {
     int ignore_hotkeys;
     SDL_GLContext winctx;
     QKbdState *kbd;
+#ifdef CONFIG_METAL
+    GLuint metal_texture;
+    uint8_t *metal_texture_data;
+    size_t metal_texture_stride;
+    int metal_texture_width;
+    int metal_texture_height;
+#endif
 };
 
 #ifdef _WIN32
@@ -811,6 +818,12 @@ static void gl_render_frame(struct xemu_console *scon)
 
     bool flip_required = false;
     bool release_surface_texture = false;
+#ifdef CONFIG_METAL
+    GLint framebuffer_filter =
+        g_config.display.filtering == CONFIG_DISPLAY_FILTERING_NEAREST
+            ? GL_NEAREST
+            : GL_LINEAR;
+#endif
 
     /* XXX: Note that this bypasses the usual VGA path in order to quickly
      * get the surface. This is simple and fast, at the cost of accuracy.
@@ -822,7 +835,62 @@ static void gl_render_frame(struct xemu_console *scon)
      * the guest code isn't using HW accelerated rendering, but just blitting
      * to the framebuffer, fall back to the VGA path.
      */
+#ifdef CONFIG_METAL
+    GLuint tex = 0;
+    if (g_config.display.renderer == CONFIG_DISPLAY_RENDERER_METAL) {
+        int width = 0;
+        int height = 0;
+
+        if (nv2a_get_metal_display_texture(&width, &height) != NULL &&
+            width > 0 && height > 0) {
+            size_t stride = (size_t)width * 4;
+
+            if (scon->metal_texture_width != width ||
+                scon->metal_texture_height != height ||
+                scon->metal_texture_stride != stride ||
+                scon->metal_texture_data == NULL) {
+                scon->metal_texture_data =
+                    g_realloc(scon->metal_texture_data, stride * height);
+                scon->metal_texture_stride = stride;
+                scon->metal_texture_width = width;
+                scon->metal_texture_height = height;
+
+                if (scon->metal_texture == 0) {
+                    glGenTextures(1, &scon->metal_texture);
+                }
+
+                glBindTexture(GL_TEXTURE_2D, scon->metal_texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                                framebuffer_filter);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                                framebuffer_filter);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                             GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+            }
+
+            if (scon->metal_texture_data &&
+                nv2a_copy_metal_display_frame(scon->metal_texture_data,
+                                              scon->metal_texture_stride,
+                                              NULL, NULL)) {
+                glBindTexture(GL_TEXTURE_2D, scon->metal_texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                                framebuffer_filter);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                                framebuffer_filter);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                                GL_BGRA, GL_UNSIGNED_BYTE,
+                                scon->metal_texture_data);
+                tex = scon->metal_texture;
+            }
+        }
+    } else {
+        tex = nv2a_get_framebuffer_surface();
+    }
+#else
     GLuint tex = nv2a_get_framebuffer_surface();
+#endif
 
     assert(glGetError() == GL_NO_ERROR);
 
@@ -859,7 +927,13 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_main_loop_unlock();
     }
 
+#ifndef CONFIG_METAL
     nv2a_release_framebuffer_surface();
+#else
+    if (g_config.display.renderer != CONFIG_DISPLAY_RENDERER_METAL) {
+        nv2a_release_framebuffer_surface();
+    }
+#endif
     SDL_GL_SwapWindow(scon->real_window);
     assert(glGetError() == GL_NO_ERROR);
 
@@ -1180,6 +1254,17 @@ static void display_finalize(void)
     }
 
     SDL_RemoveEventWatch(event_watch_callback, &scon_list[0]);
+#ifdef CONFIG_METAL
+    SDL_GL_MakeCurrent(m_window, m_context);
+    for (int i = 0; i < num_outputs; i++) {
+        g_free(scon_list[i].metal_texture_data);
+        scon_list[i].metal_texture_data = NULL;
+        if (scon_list[i].metal_texture != 0) {
+            glDeleteTextures(1, &scon_list[i].metal_texture);
+            scon_list[i].metal_texture = 0;
+        }
+    }
+#endif
     SDL_GL_MakeCurrent(NULL, NULL);
     SDL_GL_DestroyContext(m_context);
     SDL_DestroyWindow(m_window);

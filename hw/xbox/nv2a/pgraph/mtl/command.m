@@ -10,6 +10,8 @@
 
 #import <Metal/Metal.h>
 
+#include "hw/xbox/nv2a/nv2a_regs.h"
+
 #include <stdio.h>
 
 void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
@@ -22,7 +24,6 @@ void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
         return;
     }
     
-    id<MTLDevice> device = (__bridge id<MTLDevice>)r->device;
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)r->command_queue;
     
     id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
@@ -37,15 +38,28 @@ void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
     
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = colorTex;
-    passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
+    passDesc.colorAttachments[0].loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-    passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    passDesc.colorAttachments[0].clearColor = MTLClearColorMake(r->clear_color[0],
+                                                                r->clear_color[1],
+                                                                r->clear_color[2],
+                                                                r->clear_color[3]);
     
     if (depthTex) {
         passDesc.depthAttachment.texture = depthTex;
-        passDesc.depthAttachment.loadAction = MTLLoadActionClear;
+        passDesc.depthAttachment.loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
         passDesc.depthAttachment.storeAction = MTLStoreActionStore;
         passDesc.depthAttachment.clearDepth = 1.0;
+        if (r->zeta_format == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8) {
+            passDesc.stencilAttachment.texture = depthTex;
+            passDesc.stencilAttachment.loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
+            passDesc.stencilAttachment.storeAction = MTLStoreActionStore;
+            passDesc.stencilAttachment.clearStencil = 0;
+        }
+    }
+
+    if (r->visibility_result_buffer) {
+        passDesc.visibilityResultBuffer = (__bridge id<MTLBuffer>)r->visibility_result_buffer;
     }
     
     r->render_pass_descriptor = (__bridge void *)passDesc;
@@ -67,6 +81,7 @@ void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
     
     r->command_buffer_in_progress = true;
     r->render_pass_active = true;
+    r->clear_pending = false;
 }
 
 void pgraph_mtl_end_command_buffer(PGRAPHMTLState *r)
@@ -104,6 +119,33 @@ void pgraph_mtl_wait_idle(PGRAPHMTLState *r)
     id<MTLCommandBuffer> buffer = [queue commandBuffer];
     [buffer commit];
     [buffer waitUntilCompleted];
+}
+
+void pgraph_mtl_sync_texture_for_cpu(PGRAPHMTLState *r, void *texture)
+{
+    if (!r || !r->command_queue || !texture) {
+        return;
+    }
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)r->command_queue;
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+
+    if (!tex) {
+        return;
+    }
+
+    if (@available(macOS 10.15, *)) {
+        if (tex.storageMode != MTLStorageModeManaged) {
+            return;
+        }
+    }
+
+    id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
+    [blitEncoder synchronizeResource:tex];
+    [blitEncoder endEncoding];
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
 }
 
 #endif

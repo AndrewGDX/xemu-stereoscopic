@@ -30,4 +30,13 @@ unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
 
+#ifdef CONFIG_METAL
+void *nv2a_get_metal_display_texture(int *width, int *height);
+bool nv2a_copy_metal_display_frame(void *dst, size_t bytes_per_row,
+                                   int *width, int *height);
+#if defined(TARGET_OS_MAC)
+void pgraph_mtl_render_display_to_metal_layer(void *window, void *display_texture);
+#endif
+#endif
+
 #endif

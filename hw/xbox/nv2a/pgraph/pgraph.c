@@ -28,6 +28,10 @@
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
 
+#ifdef CONFIG_METAL
+#include "mtl/renderer.h"
+#endif
+
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
 #define PG_SET_MASK(reg, mask, value)        \
     do {                                     \
@@ -393,6 +397,89 @@ void nv2a_set_surface_scale_factor(unsigned int scale)
     qemu_mutex_unlock(&d->pgraph.renderer_lock);
     bql_lock();
 }
+
+#ifdef CONFIG_METAL
+void *nv2a_get_metal_display_texture(int *width, int *height)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) {
+        return NULL;
+    }
+    
+    PGRAPHState *pg = &d->pgraph;
+    void *display_texture = NULL;
+
+    qemu_mutex_lock(&pg->renderer_lock);
+    
+#ifdef CONFIG_METAL
+    if (pg->renderer && pg->renderer->type == CONFIG_DISPLAY_RENDERER_METAL &&
+        pg->mtl_renderer_state) {
+        PGRAPHMTLState *r = pg->mtl_renderer_state;
+
+        if (width) {
+            *width = r->display_width;
+        }
+        if (height) {
+            *height = r->display_height;
+        }
+
+        display_texture = r->display_texture;
+    }
+#endif
+    
+    qemu_mutex_unlock(&pg->renderer_lock);
+    
+    return display_texture;
+}
+
+bool nv2a_copy_metal_display_frame(void *dst, size_t bytes_per_row,
+                                   int *width, int *height)
+{
+    NV2AState *d = g_nv2a;
+    bool copied = false;
+
+    if (!d || !dst) {
+        return false;
+    }
+
+    PGRAPHState *pg = &d->pgraph;
+
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_event_reset(&pg->sync_complete);
+    qatomic_set(&pg->sync_pending, true);
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_event_wait(&pg->sync_complete);
+
+    qemu_mutex_lock(&pg->renderer_lock);
+
+    if (pg->renderer && pg->renderer->type == CONFIG_DISPLAY_RENDERER_METAL &&
+        pg->mtl_renderer_state && pg->mtl_renderer_state->display_texture) {
+        PGRAPHMTLState *r = pg->mtl_renderer_state;
+
+        if (!r->display_valid) {
+            qemu_mutex_unlock(&pg->renderer_lock);
+            return false;
+        }
+
+        if (width) {
+            *width = r->display_width;
+        }
+        if (height) {
+            *height = r->display_height;
+        }
+
+        copied = pgraph_mtl_display_copy_texture(r->display_texture, dst,
+                                                 bytes_per_row,
+                                                 r->display_width,
+                                                 r->display_height);
+    }
+
+    qemu_mutex_unlock(&pg->renderer_lock);
+
+    return copied;
+}
+#endif
 
 unsigned int nv2a_get_surface_scale_factor(void)
 {

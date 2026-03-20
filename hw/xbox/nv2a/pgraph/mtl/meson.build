@@ -3,6 +3,7 @@ if metal.found()
 mtl_sources = files(
 	'renderer.c',
 	'display.m',
+	'display_mtl.mm',
 	'surface.m',
 	'texture.m',
 	'shaders.m',
@@ -14,7 +15,6 @@ mtl_sources = files(
 	'reports.m',
 	'gpuprops.m',
 	'instance.m',
-	'mtl_c_api.m',
 )
 
 foreach f : mtl_sources

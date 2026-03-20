@@ -571,11 +571,11 @@ void pgraph_gl_surface_invalidate(NV2AState *d, SurfaceBinding *surface)
     trace_nv2a_pgraph_surface_invalidated(surface->vram_addr);
 
     if (surface == r->color_binding) {
-        assert(d->pgraph.surface_color.buffer_dirty);
+        d->pgraph.surface_color.buffer_dirty = true;
         pgraph_gl_unbind_surface(d, true);
     }
     if (surface == r->zeta_binding) {
-        assert(d->pgraph.surface_zeta.buffer_dirty);
+        d->pgraph.surface_zeta.buffer_dirty = true;
         pgraph_gl_unbind_surface(d, false);
     }
 
@@ -1003,7 +1003,7 @@ static void compare_surfaces(SurfaceBinding *s1, SurfaceBinding *s2)
     #undef DO_CMP
 }
 
-static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
+static bool populate_surface_binding_entry_sized(NV2AState *d, bool color,
                                                  unsigned int width,
                                                  unsigned int height,
                                                  SurfaceBinding *entry)
@@ -1043,12 +1043,13 @@ static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
     /* There's a bunch of bugs that could cause us to hit this function
      * at the wrong time and get a invalid dma object.
      * Check that it's sane. */
-    assert(dma.dma_class == NV_DMA_IN_MEMORY_CLASS);
-    // assert(dma.address + surface->offset != 0);
-    assert(surface->offset <= dma.limit);
-    assert(surface->offset + surface->pitch * height <= dma.limit + 1);
-    assert(surface->pitch % fmt.bytes_per_pixel == 0);
-    assert((dma.address & ~0x07FFFFFF) == 0);
+    if (dma.dma_class != NV_DMA_IN_MEMORY_CLASS ||
+        surface->offset > dma.limit ||
+        surface->offset + surface->pitch * height > dma.limit + 1 ||
+        surface->pitch % fmt.bytes_per_pixel != 0 ||
+        (dma.address & ~0x07FFFFFF) != 0) {
+        return false;
+    }
 
     entry->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;
@@ -1070,10 +1071,12 @@ static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
     entry->frame_time = pg->frame_time;
     entry->draw_time = pg->draw_time;
     entry->cleared = false;
+
+    return true;
 }
 
-static void populate_surface_binding_entry(NV2AState *d, bool color,
-                                                  SurfaceBinding *entry)
+static bool populate_surface_binding_entry(NV2AState *d, bool color,
+                                           SurfaceBinding *entry)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
@@ -1096,7 +1099,8 @@ static void populate_surface_binding_entry(NV2AState *d, bool color,
         height = r->color_binding->height;
     }
 
-    populate_surface_binding_entry_sized(d, color, width, height, entry);
+    return populate_surface_binding_entry_sized(d, color, width, height,
+                                                entry);
 }
 
 static void update_surface_part(NV2AState *d, bool upload, bool color)
@@ -1105,7 +1109,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
     PGRAPHGLState *r = pg->gl_renderer_state;
 
     SurfaceBinding entry;
-    populate_surface_binding_entry(d, color, &entry);
+    if (!populate_surface_binding_entry(d, color, &entry)) {
+        return;
+    }
 
     Surface *surface = color ? &pg->surface_color : &pg->surface_zeta;
 
@@ -1176,12 +1182,16 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             if (is_compatible && color &&
                 !check_surface_compatibility(found, &entry, true)) {
                 SurfaceBinding zeta_entry;
-                populate_surface_binding_entry_sized(
-                    d, !color, found->width, found->height, &zeta_entry);
-                hwaddr color_end = found->vram_addr + found->size;
-                hwaddr zeta_end = zeta_entry.vram_addr + zeta_entry.size;
-                is_compatible &= found->vram_addr >= zeta_end ||
-                                 zeta_entry.vram_addr >= color_end;
+                if (!populate_surface_binding_entry_sized(
+                        d, !color, found->width, found->height,
+                        &zeta_entry)) {
+                    is_compatible = false;
+                } else {
+                    hwaddr color_end = found->vram_addr + found->size;
+                    hwaddr zeta_end = zeta_entry.vram_addr + zeta_entry.size;
+                    is_compatible &= found->vram_addr >= zeta_end ||
+                                     zeta_entry.vram_addr >= color_end;
+                }
             }
 
             if (is_compatible && !color && r->color_binding) {

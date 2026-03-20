@@ -32,7 +32,8 @@ void pgraph_mtl_bind_vertex_attributes(PGRAPHMTLState *r, unsigned int min_eleme
     }
 }
 
-void pgraph_mtl_update_vertex_buffer(PGRAPHMTLState *r, const void *data, size_t size, size_t offset)
+static void pgraph_mtl_update_vertex_buffer(PGRAPHMTLState *r, const void *data,
+                                            size_t size, size_t offset)
 {
     if (!r->vertex_buffer || !data || size == 0) {
         return;
@@ -47,7 +48,8 @@ void pgraph_mtl_update_vertex_buffer(PGRAPHMTLState *r, const void *data, size_t
     memcpy(buffer.contents + offset, data, size);
 }
 
-void pgraph_mtl_update_index_buffer(PGRAPHMTLState *r, const void *data, size_t size, size_t offset)
+static void pgraph_mtl_update_index_buffer(PGRAPHMTLState *r, const void *data,
+                                           size_t size, size_t offset)
 {
     if (!r->index_buffer || !data || size == 0) {
         return;

@@ -28,6 +28,7 @@ void pgraph_mtl_init_display(PGRAPHMTLState *r)
     
     r->display_width = 640;
     r->display_height = 480;
+    r->display_valid = false;
     
     MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                     width:r->display_width
@@ -72,18 +73,23 @@ void pgraph_mtl_display_render(PGRAPHMTLState *r)
     [commandBuffer commit];
 }
 
-void pgraph_mtl_display_present(PGRAPHMTLState *r)
+bool pgraph_mtl_display_refresh(PGRAPHMTLState *r)
 {
     if (!r || !r->device || !r->command_queue || !r->surface_color) {
-        return;
+        return false;
     }
     
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)r->command_queue;
     id<MTLTexture> surfaceTex = (__bridge id<MTLTexture>)r->surface_color;
     id<MTLTexture> displayTex = (__bridge id<MTLTexture>)r->display_texture;
-    
+
     if (!surfaceTex || !displayTex) {
-        return;
+        return false;
+    }
+
+    if (r->display_width != surfaceTex.width ||
+        r->display_height != surfaceTex.height) {
+        return false;
     }
     
     id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
@@ -108,6 +114,14 @@ void pgraph_mtl_display_present(PGRAPHMTLState *r)
     
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
+
+    r->display_valid = true;
+    return true;
+}
+
+void pgraph_mtl_display_present(PGRAPHMTLState *r)
+{
+    (void)pgraph_mtl_display_refresh(r);
 }
 
 void pgraph_mtl_display_set_size(PGRAPHMTLState *r, uint32_t width, uint32_t height)
@@ -129,6 +143,7 @@ void pgraph_mtl_display_set_size(PGRAPHMTLState *r, uint32_t width, uint32_t hei
     
     r->display_width = width;
     r->display_height = height;
+    r->display_valid = false;
     
     MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                     width:width
@@ -142,11 +157,33 @@ void pgraph_mtl_display_set_size(PGRAPHMTLState *r, uint32_t width, uint32_t hei
     fprintf(stderr, "Metal: Display size changed to %dx%d\n", width, height);
 }
 
+bool pgraph_mtl_display_upload(PGRAPHMTLState *r, const void *data,
+                               uint32_t width, uint32_t height,
+                               uint32_t bytes_per_row)
+{
+    if (!r || !r->display_texture || !data || !width || !height) {
+        return false;
+    }
+
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)r->display_texture;
+    if (!tex || tex.width != width || tex.height != height) {
+        return false;
+    }
+
+    [tex replaceRegion:MTLRegionMake2D(0, 0, width, height)
+           mipmapLevel:0
+             withBytes:data
+           bytesPerRow:bytes_per_row];
+    r->display_valid = true;
+    return true;
+}
+
 void pgraph_mtl_display_destroy(PGRAPHMTLState *r)
 {
     if (r->display_texture) {
         r->display_texture = nil;
     }
+    r->display_valid = false;
 }
 
 #endif

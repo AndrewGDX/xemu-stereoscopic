@@ -15,6 +15,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "hw/xbox/nv2a/nv2a_regs.h"
+
 #ifndef NV2A_STATE_C
 #define NV2A_STATE_C
 struct NV2AState;
@@ -27,11 +29,55 @@ struct PGRAPHState;
 typedef struct PGRAPHState PGRAPHState;
 #endif
 
-#ifndef PGRAPH_STATE_C
-#define PGRAPH_STATE_C
-struct PGRAPHState;
-typedef struct PGRAPHState PGRAPHState;
-#endif
+static MTLPixelFormat pgraph_mtl_color_pixel_format(uint32_t color_format)
+{
+    switch (color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_O8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_Z1A7R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_O1A7R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+    default:
+        return MTLPixelFormatBGRA8Unorm;
+    }
+}
+
+static unsigned int pgraph_mtl_color_bytes_per_pixel(uint32_t color_format)
+{
+    switch (color_format) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+        return 1;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        return 2;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+    default:
+        return 4;
+    }
+}
+
+static MTLPixelFormat pgraph_mtl_zeta_pixel_format(uint32_t zeta_format)
+{
+    switch (zeta_format) {
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z16:
+        return MTLPixelFormatDepth16Unorm;
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z24S8:
+    default:
+        return MTLPixelFormatDepth32Float_Stencil8;
+    }
+}
+
+static MTLStorageMode pgraph_mtl_zeta_storage_mode(void)
+{
+    return MTLStorageModePrivate;
+}
 
 void pgraph_mtl_init_surfaces(PGRAPHMTLState *r)
 {
@@ -47,21 +93,21 @@ void pgraph_mtl_init_surfaces(PGRAPHMTLState *r)
     uint32_t width = r->viewport_width ? r->viewport_width : 640;
     uint32_t height = r->viewport_height ? r->viewport_height : 480;
     
-    MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                    width:width
-                                                                                   height:height
-                                                                                mipmapped:NO];
+    MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_color_pixel_format(r->color_format)
+                                                                                     width:width
+                                                                                    height:height
+                                                                                 mipmapped:NO];
     colorDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    colorDesc.storageMode = MTLStorageModePrivate;
+    colorDesc.storageMode = MTLStorageModeManaged;
     
     r->surface_color = (__bridge void *)[device newTextureWithDescriptor:colorDesc];
     
-    MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                                                      width:width
-                                                                                     height:height
-                                                                                  mipmapped:NO];
+    MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_zeta_pixel_format(r->zeta_format)
+                                                                                       width:width
+                                                                                      height:height
+                                                                                   mipmapped:NO];
     depthDesc.usage = MTLTextureUsageRenderTarget;
-    depthDesc.storageMode = MTLStorageModePrivate;
+    depthDesc.storageMode = pgraph_mtl_zeta_storage_mode();
     
     r->surface_zeta = (__bridge void *)[device newTextureWithDescriptor:depthDesc];
     
@@ -88,31 +134,27 @@ void pgraph_mtl_surface_update(PGRAPHMTLState *r)
     
     if (colorTex.width != width || colorTex.height != height) {
         if (r->surface_color) {
-            id<MTLTexture> t = (__bridge id<MTLTexture>)r->surface_color;
-            t = nil;
             r->surface_color = NULL;
         }
         if (r->surface_zeta) {
-            id<MTLTexture> d = (__bridge id<MTLTexture>)r->surface_zeta;
-            d = nil;
             r->surface_zeta = NULL;
         }
         
-        MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                        width:width
-                                                                                       height:height
-                                                                                    mipmapped:NO];
+        MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_color_pixel_format(r->color_format)
+                                                                                         width:width
+                                                                                        height:height
+                                                                                     mipmapped:NO];
         colorDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-        colorDesc.storageMode = MTLStorageModePrivate;
+        colorDesc.storageMode = MTLStorageModeManaged;
         
         r->surface_color = (__bridge void *)[device newTextureWithDescriptor:colorDesc];
         
-        MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                                                          width:width
-                                                                                         height:height
-                                                                                      mipmapped:NO];
+        MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_zeta_pixel_format(r->zeta_format)
+                                                                                           width:width
+                                                                                          height:height
+                                                                                       mipmapped:NO];
         depthDesc.usage = MTLTextureUsageRenderTarget;
-        depthDesc.storageMode = MTLStorageModePrivate;
+        depthDesc.storageMode = pgraph_mtl_zeta_storage_mode();
         
         r->surface_zeta = (__bridge void *)[device newTextureWithDescriptor:depthDesc];
         
@@ -128,14 +170,10 @@ void pgraph_mtl_surface_clear(PGRAPHMTLState *r)
 void pgraph_mtl_surface_destroy(PGRAPHMTLState *r)
 {
     if (r->surface_color) {
-        id<MTLTexture> t = (__bridge id<MTLTexture>)r->surface_color;
-        t = nil;
         r->surface_color = NULL;
     }
     
     if (r->surface_zeta) {
-        id<MTLTexture> d = (__bridge id<MTLTexture>)r->surface_zeta;
-        d = nil;
         r->surface_zeta = NULL;
     }
     
@@ -144,17 +182,62 @@ void pgraph_mtl_surface_destroy(PGRAPHMTLState *r)
     }
 }
 
-void *pgraph_mtl_get_color_surface(PGRAPHMTLState *r)
+void pgraph_mtl_surface_upload_color(PGRAPHMTLState *r, const void *data,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t bytes_per_row)
 {
-    return r->surface_color;
+    if (!r || !r->surface_color || !data || !width || !height) {
+        return;
+    }
+
+    id<MTLTexture> colorTex = (__bridge id<MTLTexture>)r->surface_color;
+    [colorTex replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                mipmapLevel:0
+                  withBytes:data
+                bytesPerRow:bytes_per_row];
 }
 
-void *pgraph_mtl_get_depth_surface(PGRAPHMTLState *r)
+void pgraph_mtl_surface_upload_zeta(PGRAPHMTLState *r, const void *data,
+                                    uint32_t width, uint32_t height,
+                                    uint32_t bytes_per_row)
 {
-    return r->surface_zeta;
+    if (!r || !r->surface_zeta || !r->command_queue || !r->staging_buffer ||
+        !data || !width || !height) {
+        return;
+    }
+
+    size_t size = (size_t)bytes_per_row * height;
+    id<MTLBuffer> stagingBuffer = (__bridge id<MTLBuffer>)r->staging_buffer;
+    if (stagingBuffer.length < size) {
+        fprintf(stderr, "Metal: staging buffer too small for zeta upload (%zu)\n",
+                size);
+        return;
+    }
+
+    memcpy(stagingBuffer.contents, data, size);
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)r->command_queue;
+    id<MTLTexture> zetaTex = (__bridge id<MTLTexture>)r->surface_zeta;
+    id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
+
+    [blitEncoder copyFromBuffer:stagingBuffer
+                   sourceOffset:0
+              sourceBytesPerRow:bytes_per_row
+            sourceBytesPerImage:size
+                     sourceSize:MTLSizeMake(width, height, 1)
+                      toTexture:zetaTex
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+
+    [blitEncoder endEncoding];
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
 }
 
-void pgraph_mtl_surface_update_from_vram(NV2AState *d, bool upload, bool color_write, bool zeta_write)
+void pgraph_mtl_surface_update_from_vram(NV2AState *d, bool upload,
+                                         bool color_write, bool zeta_write)
 {
     (void)d;
     (void)upload;

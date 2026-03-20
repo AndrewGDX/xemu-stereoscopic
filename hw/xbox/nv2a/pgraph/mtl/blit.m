@@ -26,7 +26,6 @@ void pgraph_mtl_image_blit(PGRAPHMTLState *r)
         return;
     }
     
-    id<MTLDevice> device = (__bridge id<MTLDevice>)r->device;
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)r->command_queue;
     
     id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
