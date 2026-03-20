@@ -52,6 +52,12 @@ void pgraph_mtl_init_display(PGRAPHMTLState *r)
 
 void pgraph_mtl_display_render(PGRAPHMTLState *r)
 {
+    bool refreshed;
+
+    if (!r) {
+        return;
+    }
+
     if (!r->device || !r->command_queue) {
         return;
     }
@@ -66,6 +72,11 @@ void pgraph_mtl_display_render(PGRAPHMTLState *r)
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
         dispatch_semaphore_signal(sem);
     }];
+
+    refreshed = pgraph_mtl_display_refresh(r);
+    if (!refreshed) {
+        r->display_valid = false;
+    }
     
     r->current_frame_index = (r->current_frame_index + 1) % 3;
     r->frame_count++;

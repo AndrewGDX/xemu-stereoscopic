@@ -385,6 +385,26 @@ void nv2a_release_framebuffer_surface(void)
     qemu_mutex_unlock(&pg->renderer_lock);
 }
 
+int nv2a_get_active_renderer(void)
+{
+    NV2AState *d = g_nv2a;
+    PGRAPHState *pg;
+    int renderer = CONFIG_DISPLAY_RENDERER_NULL;
+
+    if (!d) {
+        return renderer;
+    }
+
+    pg = &d->pgraph;
+    qemu_mutex_lock(&pg->renderer_lock);
+    if (pg->renderer) {
+        renderer = pg->renderer->type;
+    }
+    qemu_mutex_unlock(&pg->renderer_lock);
+
+    return renderer;
+}
+
 void nv2a_set_surface_scale_factor(unsigned int scale)
 {
     NV2AState *d = g_nv2a;

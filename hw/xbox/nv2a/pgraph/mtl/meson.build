@@ -1,5 +1,7 @@
 if metal.found()
 
+iosurface = dependency('appleframeworks', modules: ['IOSurface', 'CoreVideo'])
+
 mtl_sources = files(
 	'renderer.c',
 	'display.m',
@@ -18,7 +20,7 @@ mtl_sources = files(
 )
 
 foreach f : mtl_sources
-	specific_ss.add([metal, f])
+	specific_ss.add([metal, iosurface, f])
 endforeach
 
 endif

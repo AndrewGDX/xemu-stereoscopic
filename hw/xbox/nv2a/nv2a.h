@@ -21,10 +21,18 @@
 #ifndef HW_NV2A_H
 #define HW_NV2A_H
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct PCIBus PCIBus;
+typedef struct MemoryRegion MemoryRegion;
+
 void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
 void nv2a_context_init(void);
 int nv2a_get_framebuffer_surface(void);
 void nv2a_release_framebuffer_surface(void);
+int nv2a_get_active_renderer(void);
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);
@@ -35,7 +43,7 @@ void *nv2a_get_metal_display_texture(int *width, int *height);
 bool nv2a_copy_metal_display_frame(void *dst, size_t bytes_per_row,
                                    int *width, int *height);
 #if defined(TARGET_OS_MAC)
-void pgraph_mtl_render_display_to_metal_layer(void *window, void *display_texture);
+void pgraph_mtl_destroy_display_presenter(void);
 #endif
 #endif
 

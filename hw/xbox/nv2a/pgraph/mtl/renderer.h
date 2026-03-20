@@ -280,9 +280,14 @@ extern "C" {
 #endif
 
 void pgraph_mtl_set_display_device(void *device);
+unsigned int pgraph_mtl_display_get_gl_texture(void *device,
+                                               void *display_texture,
+                                               uint32_t width,
+                                               uint32_t height);
+void pgraph_mtl_destroy_display_presenter(void);
 bool pgraph_mtl_display_copy_texture(void *texture, void *dst,
-                                     size_t bytes_per_row,
-                                     uint32_t width, uint32_t height);
+                                      size_t bytes_per_row,
+                                      uint32_t width, uint32_t height);
 
 #ifdef __cplusplus
 }

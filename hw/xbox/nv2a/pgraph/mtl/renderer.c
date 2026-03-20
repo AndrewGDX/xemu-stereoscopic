@@ -904,7 +904,6 @@ static PGRAPHMTLDisplaySurfaceCacheEntry *
 pgraph_mtl_find_display_surface_cache_entry(PGRAPHMTLState *r, hwaddr addr)
 {
     GPtrArray *cache = r->display_surface_cache;
-    PGRAPHMTLDisplaySurfaceCacheEntry *best = NULL;
 
     if (!cache) {
         return NULL;
@@ -916,14 +915,9 @@ pgraph_mtl_find_display_surface_cache_entry(PGRAPHMTLState *r, hwaddr addr)
         if (addr >= entry->vram_addr && addr < entry->vram_addr + entry->size) {
             return entry;
         }
-
-        if ((!best || entry->frame_time > best->frame_time) &&
-            entry->tex_width >= 64 && entry->tex_height >= 64) {
-            best = entry;
-        }
     }
 
-    return best;
+    return NULL;
 }
 
 static void pgraph_mtl_snapshot_current_surface(NV2AState *d)
@@ -1610,6 +1604,7 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
     }
 
     if (upload && color_write && r->surface_color) {
+        DMAObject dma = nv_dma_load(d, pg->dma_color);
         unsigned int width = pg->surface_binding_dim.width;
         unsigned int height = pg->surface_binding_dim.height;
         unsigned int bpp = pgraph_mtl_surface_color_bytes_per_pixel(
@@ -1617,14 +1612,24 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
         unsigned int scale = MAX(1u, pg->surface_scale_factor);
         bool swizzle =
             pg->surface_type == NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE;
+        hwaddr surface_addr;
+        hwaddr surface_size;
         uint8_t *src;
         uint8_t *buf;
         uint8_t *linear_buf = NULL;
         unsigned int linear_pitch;
 
-        if (pg->surface_color.offset < memory_region_size(d->vram) && width &&
-            height) {
-            src = d->vram_ptr + pg->surface_color.offset;
+        surface_size = (hwaddr)pg->surface_color.pitch * height;
+        if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS && width && height &&
+            pg->surface_color.offset <= dma.limit) {
+            surface_addr = dma.address + pg->surface_color.offset;
+        } else {
+            surface_addr = memory_region_size(d->vram);
+        }
+
+        if (surface_addr < memory_region_size(d->vram) &&
+            surface_addr + surface_size <= memory_region_size(d->vram)) {
+            src = d->vram_ptr + surface_addr;
             buf = src;
 
             if (swizzle) {
@@ -1692,6 +1697,7 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
     }
 
     if (upload && zeta_write && r->surface_zeta) {
+        DMAObject dma = nv_dma_load(d, pg->dma_zeta);
         unsigned int width = pg->surface_binding_dim.width;
         unsigned int height = pg->surface_binding_dim.height;
         unsigned int bpp = pgraph_mtl_surface_zeta_bytes_per_pixel(
@@ -1699,14 +1705,24 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
         unsigned int scale = MAX(1u, pg->surface_scale_factor);
         bool swizzle =
             pg->surface_type == NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE;
+        hwaddr surface_addr;
+        hwaddr surface_size;
         uint8_t *src;
         uint8_t *buf;
         uint8_t *linear_buf = NULL;
         unsigned int linear_pitch;
 
-        if (pg->surface_zeta.offset < memory_region_size(d->vram) && width &&
-            height) {
-            src = d->vram_ptr + pg->surface_zeta.offset;
+        surface_size = (hwaddr)pg->surface_zeta.pitch * height;
+        if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS && width && height &&
+            pg->surface_zeta.offset <= dma.limit) {
+            surface_addr = dma.address + pg->surface_zeta.offset;
+        } else {
+            surface_addr = memory_region_size(d->vram);
+        }
+
+        if (surface_addr < memory_region_size(d->vram) &&
+            surface_addr + surface_size <= memory_region_size(d->vram)) {
+            src = d->vram_ptr + surface_addr;
             buf = src;
 
             if (swizzle) {
@@ -1774,6 +1790,28 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
     }
 
     pgraph_mtl_surface_update_from_vram(d, upload, color_write, zeta_write);
+}
+
+void pgraph_mtl_surface_update_from_vram(NV2AState *d, bool upload,
+                                         bool color_write, bool zeta_write)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHMTLState *r = pg->mtl_renderer_state;
+
+    if (!r) {
+        return;
+    }
+
+    if (!upload || (!color_write && !zeta_write)) {
+        r->display_valid = false;
+        return;
+    }
+
+    r->framebuffer_texture = r->surface_color;
+
+    if (color_write && !pgraph_mtl_display_refresh(r)) {
+        r->display_valid = false;
+    }
 }
 
 static void pgraph_mtl_update_display_size(NV2AState *d)
@@ -1950,12 +1988,29 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
-    
-    if (!r || !r->surface_color) {
+    unsigned int gl_texture;
+
+    if (!r || !r->display_texture || !r->display_valid) {
         return 0;
     }
-    
-    return 0;
+
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_event_reset(&d->pgraph.sync_complete);
+    qatomic_set(&pg->sync_pending, true);
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_event_wait(&d->pgraph.sync_complete);
+
+    if (!r->display_texture || !r->display_valid ||
+        r->display_width == 0 || r->display_height == 0) {
+        return 0;
+    }
+
+    gl_texture = pgraph_mtl_display_get_gl_texture(r->device,
+                                                   r->display_texture,
+                                                   r->display_width,
+                                                   r->display_height);
+    return gl_texture;
 }
 
 static void pgraph_mtl_flip_stall(NV2AState *d)

@@ -446,8 +446,20 @@ void pgraph_mtl_destroy_textures(PGRAPHMTLState *r)
 
 void pgraph_mtl_texture_update(PGRAPHMTLState *r, unsigned int slot)
 {
-    (void)r;
-    (void)slot;
+    TextureSlot *textures;
+
+    if (!r || !r->texture_cache || slot >= MAX_TEXTURES) {
+        return;
+    }
+
+    textures = (TextureSlot *)r->texture_cache;
+    textures[slot].valid = false;
+    textures[slot].hash = 0;
+    textures[slot].texture = nil;
+
+    if (slot < ARRAY_SIZE(r->sampler_states)) {
+        r->sampler_states[slot] = nil;
+    }
 }
 
 void pgraph_mtl_bind_texture(PGRAPHMTLState *r, unsigned int slot)

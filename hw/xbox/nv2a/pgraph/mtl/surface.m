@@ -47,22 +47,6 @@ static MTLPixelFormat pgraph_mtl_color_pixel_format(uint32_t color_format)
     }
 }
 
-static unsigned int pgraph_mtl_color_bytes_per_pixel(uint32_t color_format)
-{
-    switch (color_format) {
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
-        return 1;
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
-        return 2;
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
-    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
-    default:
-        return 4;
-    }
-}
-
 static MTLPixelFormat pgraph_mtl_zeta_pixel_format(uint32_t zeta_format)
 {
     switch (zeta_format) {
@@ -234,15 +218,6 @@ void pgraph_mtl_surface_upload_zeta(PGRAPHMTLState *r, const void *data,
     [blitEncoder endEncoding];
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
-}
-
-void pgraph_mtl_surface_update_from_vram(NV2AState *d, bool upload,
-                                         bool color_write, bool zeta_write)
-{
-    (void)d;
-    (void)upload;
-    (void)color_write;
-    (void)zeta_write;
 }
 
 #endif
