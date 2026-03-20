@@ -206,6 +206,11 @@ unsigned int pgraph_mtl_display_get_gl_texture(void *device_handle,
           destinationSlice:0
           destinationLevel:0
          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    if (@available(macOS 10.15, *)) {
+        if (dst.storageMode == MTLStorageModeManaged) {
+            [blit synchronizeResource:dst];
+        }
+    }
     [blit endEncoding];
 
     [cmd commit];

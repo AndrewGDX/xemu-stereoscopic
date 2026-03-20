@@ -20,9 +20,39 @@ struct Error;
 typedef struct Error Error;
 #endif
 
+static id<MTLDevice> pgraph_mtl_select_device(void)
+{
+    id<MTLDevice> selected = nil;
+    NSArray<id<MTLDevice>> *devices;
+
+    if (@available(macOS 10.13, *)) {
+        devices = MTLCopyAllDevices();
+        for (id<MTLDevice> candidate in devices) {
+            if ([candidate isLowPower] && ![candidate isHeadless]) {
+                selected = candidate;
+                break;
+            }
+        }
+        if (!selected) {
+            for (id<MTLDevice> candidate in devices) {
+                if (![candidate isHeadless]) {
+                    selected = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!selected) {
+        selected = MTLCreateSystemDefaultDevice();
+    }
+
+    return selected;
+}
+
 void pgraph_mtl_init_device(PGRAPHMTLState *r, Error **errp)
 {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device = pgraph_mtl_select_device();
     if (!device) {
         fprintf(stderr, "Metal: Failed to create device\n");
         r->initialized = false;

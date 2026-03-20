@@ -38,23 +38,26 @@ void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
     
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = colorTex;
-    passDesc.colorAttachments[0].loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
+    passDesc.colorAttachments[0].loadAction =
+        r->clear_color_pending ? MTLLoadActionClear : MTLLoadActionLoad;
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(r->clear_color[0],
-                                                                r->clear_color[1],
-                                                                r->clear_color[2],
-                                                                r->clear_color[3]);
+                                                                 r->clear_color[1],
+                                                                 r->clear_color[2],
+                                                                 r->clear_color[3]);
     
     if (depthTex) {
         passDesc.depthAttachment.texture = depthTex;
-        passDesc.depthAttachment.loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
+        passDesc.depthAttachment.loadAction =
+            r->clear_zeta_pending ? MTLLoadActionClear : MTLLoadActionLoad;
         passDesc.depthAttachment.storeAction = MTLStoreActionStore;
-        passDesc.depthAttachment.clearDepth = 1.0;
+        passDesc.depthAttachment.clearDepth = r->clear_depth;
         if (r->zeta_format == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8) {
             passDesc.stencilAttachment.texture = depthTex;
-            passDesc.stencilAttachment.loadAction = r->clear_pending ? MTLLoadActionClear : MTLLoadActionLoad;
+            passDesc.stencilAttachment.loadAction =
+                r->clear_zeta_pending ? MTLLoadActionClear : MTLLoadActionLoad;
             passDesc.stencilAttachment.storeAction = MTLStoreActionStore;
-            passDesc.stencilAttachment.clearStencil = 0;
+            passDesc.stencilAttachment.clearStencil = r->clear_stencil;
         }
     }
 
@@ -82,6 +85,8 @@ void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r)
     r->command_buffer_in_progress = true;
     r->render_pass_active = true;
     r->clear_pending = false;
+    r->clear_color_pending = false;
+    r->clear_zeta_pending = false;
 }
 
 void pgraph_mtl_end_command_buffer(PGRAPHMTLState *r)

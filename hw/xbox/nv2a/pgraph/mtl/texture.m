@@ -547,6 +547,12 @@ void pgraph_mtl_upload_texture(PGRAPHMTLState *r, unsigned int slot,
     uint32_t adjusted_pitch = shape->pitch;
     MTLPixelFormat texture_format = MTLPixelFormatRGBA8Unorm;
     MTLTextureDescriptor *desc;
+    bool alpha_ignored = false;
+
+    if (pgraph_mtl_is_direct_bgra_format(shape->color_format, &texture_format,
+                                         &alpha_ignored) && alpha_ignored) {
+        texture_format = MTLPixelFormatRGBA8Unorm;
+    }
 
     if (tex->texture && tex->hash == hash && tex->width == shape->width &&
         tex->height == shape->height && tex->depth == shape->depth &&

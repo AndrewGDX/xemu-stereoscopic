@@ -404,27 +404,12 @@ static void pgraph_mtl_decode_vertex_from_inline_buffer(NV2AState *d,
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
         memcpy(attrs[i], pg->vertex_attributes[i].inline_value,
                sizeof(pg->vertex_attributes[i].inline_value));
-    }
 
-    if (pg->vertex_attributes[0].inline_buffer_populated) {
-        memcpy(attrs[0],
-               &pg->vertex_attributes[0].inline_buffer[index * 4],
-               sizeof(attrs[0]));
-    }
-    if (pg->vertex_attributes[2].inline_buffer_populated) {
-        memcpy(attrs[2],
-               &pg->vertex_attributes[2].inline_buffer[index * 4],
-               sizeof(attrs[2]));
-    }
-    if (pg->vertex_attributes[3].inline_buffer_populated) {
-        memcpy(attrs[3],
-               &pg->vertex_attributes[3].inline_buffer[index * 4],
-               sizeof(attrs[3]));
-    }
-    if (pg->vertex_attributes[9].inline_buffer_populated) {
-        memcpy(attrs[9],
-               &pg->vertex_attributes[9].inline_buffer[index * 4],
-               sizeof(attrs[9]));
+        if (pg->vertex_attributes[i].inline_buffer_populated) {
+            memcpy(attrs[i],
+                   &pg->vertex_attributes[i].inline_buffer[index * 4],
+                   sizeof(attrs[i]));
+        }
     }
 
     if (!pgraph_mtl_run_programmable_vsh(pg, program, attrs, v) &&
@@ -627,6 +612,22 @@ static unsigned int pgraph_mtl_surface_color_bytes_per_pixel(
 }
 
 static void pgraph_mtl_update_display_size(NV2AState *d);
+static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
+                                               bool color_write,
+                                               bool zeta_write);
+
+static bool pgraph_mtl_framebuffer_dirty(const PGRAPHState *pg)
+{
+    bool shape_changed = memcmp(&pg->surface_shape, &pg->last_surface_shape,
+                                sizeof(SurfaceShape)) != 0;
+
+    if (!shape_changed || (!pg->surface_shape.color_format &&
+                           !pg->surface_shape.zeta_format)) {
+        return false;
+    }
+
+    return true;
+}
 
 static unsigned int pgraph_mtl_surface_zeta_bytes_per_pixel(
     unsigned int zeta_format)
@@ -713,6 +714,246 @@ static uint8_t *pgraph_mtl_surface_convert_to_bgra8(const uint8_t *src,
     return dst;
 }
 
+static void pgraph_mtl_surface_copy_shrink_row(uint8_t *out, const uint8_t *in,
+                                               unsigned int width,
+                                               unsigned int bytes_per_pixel,
+                                               unsigned int scale)
+{
+    for (unsigned int x = 0; x < width; x++) {
+        memcpy(out + x * bytes_per_pixel,
+               in + x * bytes_per_pixel * scale,
+               bytes_per_pixel);
+    }
+}
+
+static void pgraph_mtl_surface_convert_from_bgra8(const uint8_t *src,
+                                                  unsigned int width,
+                                                  unsigned int height,
+                                                  unsigned int src_pitch,
+                                                  uint8_t *dst,
+                                                  unsigned int dst_pitch,
+                                                  unsigned int color_format)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        const uint8_t *in = src + y * src_pitch;
+        uint8_t *out = dst + y * dst_pitch;
+
+        for (unsigned int x = 0; x < width; x++) {
+            uint8_t b = in[x * 4 + 0];
+            uint8_t g = in[x * 4 + 1];
+            uint8_t r = in[x * 4 + 2];
+            uint8_t a = in[x * 4 + 3];
+
+            switch (color_format) {
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+                out[x] = (uint8_t)((30u * r + 59u * g + 11u * b) / 100u);
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+                out[x * 2 + 0] = b;
+                out[x * 2 + 1] = g;
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5: {
+                uint16_t v = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+                ((uint16_t *)out)[x] = v | 0x8000;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5: {
+                uint16_t v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                ((uint16_t *)out)[x] = v;
+                break;
+            }
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+                out[x * 4 + 0] = b;
+                out[x * 4 + 1] = g;
+                out[x * 4 + 2] = r;
+                out[x * 4 + 3] = a;
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_O8R8G8B8:
+                out[x * 4 + 0] = b;
+                out[x * 4 + 1] = g;
+                out[x * 4 + 2] = r;
+                out[x * 4 + 3] = 0;
+                break;
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_Z1A7R8G8B8:
+            case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_O1A7R8G8B8:
+                out[x * 4 + 0] = b;
+                out[x * 4 + 1] = g;
+                out[x * 4 + 2] = r;
+                out[x * 4 + 3] = a & 0x80;
+                break;
+            default:
+                out[x * 4 + 0] = b;
+                out[x * 4 + 1] = g;
+                out[x * 4 + 2] = r;
+                out[x * 4 + 3] = 0xff;
+                break;
+            }
+        }
+    }
+}
+
+static void pgraph_mtl_perform_blit(int operation, uint8_t *source,
+                                    uint8_t *dest, size_t width,
+                                    size_t height, size_t width_bytes,
+                                    size_t source_pitch, size_t dest_pitch,
+                                    BetaState *beta)
+{
+    if (operation == NV09F_SET_OPERATION_SRCCOPY) {
+        for (unsigned int y = 0; y < height; y++) {
+            memmove(dest, source, width_bytes);
+            source += source_pitch;
+            dest += dest_pitch;
+        }
+    } else if (operation == NV09F_SET_OPERATION_BLEND_AND) {
+        uint32_t max_beta_mult = 0x7f80;
+        uint32_t beta_mult = beta->beta >> 16;
+        uint32_t inv_beta_mult = max_beta_mult - beta_mult;
+
+        for (unsigned int y = 0; y < height; y++) {
+            uint8_t *s = source;
+            uint8_t *d = dest;
+            for (unsigned int x = 0; x < width; x++) {
+                for (unsigned int ch = 0; ch < 3; ch++) {
+                    uint32_t a = s[x * 4 + ch] * beta_mult;
+                    uint32_t b = d[x * 4 + ch] * inv_beta_mult;
+                    d[x * 4 + ch] = (a + b) / max_beta_mult;
+                }
+            }
+            source += source_pitch;
+            dest += dest_pitch;
+        }
+    }
+}
+
+static void pgraph_mtl_patch_alpha(uint8_t *dest, size_t width_pixels,
+                                   size_t height, size_t dest_pitch,
+                                   uint8_t alpha_val)
+{
+    for (unsigned int y = 0; y < height; y++) {
+        uint8_t *d = dest;
+        for (unsigned int x = 0; x < width_pixels; x++) {
+            d[x * 4 + 3] = alpha_val;
+        }
+        dest += dest_pitch;
+    }
+}
+
+static void pgraph_mtl_surface_download_color(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHMTLState *r = pg->mtl_renderer_state;
+    DMAObject dma;
+    hwaddr surface_addr;
+    hwaddr surface_size;
+    unsigned int width;
+    unsigned int height;
+    unsigned int scaled_width;
+    unsigned int scaled_height;
+    unsigned int bpp;
+    unsigned int pitch;
+    bool swizzle;
+    uint8_t *readback;
+    uint8_t *linear = NULL;
+    uint8_t *converted = NULL;
+
+    if (!r || !r->surface_color) {
+        return;
+    }
+
+    width = pg->surface_binding_dim.width;
+    height = pg->surface_binding_dim.height;
+    pitch = pg->surface_color.pitch;
+    bpp = pgraph_mtl_surface_color_bytes_per_pixel(pg->surface_shape.color_format);
+    swizzle = pg->surface_type == NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE;
+    if (!width || !height || !pitch || !bpp) {
+        return;
+    }
+
+    dma = nv_dma_load(d, pg->dma_color);
+    if (dma.dma_class != NV_DMA_IN_MEMORY_CLASS ||
+        pg->surface_color.offset > dma.limit) {
+        return;
+    }
+
+    surface_addr = dma.address + pg->surface_color.offset;
+    surface_size = (hwaddr)pitch * height;
+    if (surface_size > dma.limit + 1 - pg->surface_color.offset) {
+        return;
+    }
+    if (surface_addr >= memory_region_size(d->vram) ||
+        surface_addr + surface_size > memory_region_size(d->vram)) {
+        return;
+    }
+
+    scaled_width = width;
+    scaled_height = height;
+    pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
+
+    readback = g_malloc((size_t)scaled_width * scaled_height * 4);
+    pgraph_mtl_sync_texture_for_cpu(r, r->surface_color);
+    if (!pgraph_mtl_display_copy_texture(r->surface_color, readback,
+                                         scaled_width * 4,
+                                         scaled_width, scaled_height)) {
+        g_free(readback);
+        return;
+    }
+
+    if (pg->surface_scale_factor > 1) {
+        linear = g_malloc((size_t)width * height * 4);
+        for (unsigned int y = 0; y < height; y++) {
+            pgraph_mtl_surface_copy_shrink_row(
+                linear + (size_t)y * width * 4,
+                readback + (size_t)y * scaled_width * 4 * pg->surface_scale_factor,
+                width, 4, pg->surface_scale_factor);
+        }
+        g_free(readback);
+    } else {
+        linear = readback;
+    }
+
+    if (bpp == 4 &&
+        (pg->surface_shape.color_format ==
+             NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8 ||
+         pg->surface_shape.color_format ==
+             NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_O8R8G8B8 ||
+         pg->surface_shape.color_format ==
+             NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_Z1A7R8G8B8 ||
+         pg->surface_shape.color_format ==
+             NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_O1A7R8G8B8 ||
+         pg->surface_shape.color_format ==
+             NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8)) {
+        converted = linear;
+    } else {
+        converted = g_malloc((size_t)width * height * bpp);
+        pgraph_mtl_surface_convert_from_bgra8(linear, width, height, width * 4,
+                                              converted, width * bpp,
+                                              pg->surface_shape.color_format);
+    }
+
+    if (swizzle) {
+        swizzle_rect(converted, width, height, d->vram_ptr + surface_addr,
+                     pitch, bpp);
+    } else {
+        for (unsigned int y = 0; y < height; y++) {
+            memcpy(d->vram_ptr + surface_addr + (hwaddr)y * pitch,
+                   converted + (size_t)y * width * bpp,
+                   width * bpp);
+        }
+    }
+
+    memory_region_set_client_dirty(d->vram, surface_addr, surface_size,
+                                   DIRTY_MEMORY_VGA);
+    memory_region_set_client_dirty(d->vram, surface_addr, surface_size,
+                                   DIRTY_MEMORY_NV2A_TEX);
+
+    if (converted != linear) {
+        g_free(converted);
+    }
+    g_free(linear);
+}
+
 static bool pgraph_mtl_texture_stage_usable(PGRAPHState *pg,
                                             unsigned int stage)
 {
@@ -739,7 +980,7 @@ static bool pgraph_mtl_texture_stage_usable(PGRAPHState *pg,
         return false;
     }
 
-    if (dimensionality < 2 || dimensionality > 3) {
+    if (dimensionality < 1 || dimensionality > 3) {
         return false;
     }
 
@@ -1030,7 +1271,8 @@ static bool pgraph_mtl_update_display_from_surface(NV2AState *d,
 
     scanout_addr = d->pcrtc.start + vga_display_params.line_offset;
     entry = pgraph_mtl_find_display_surface_cache_entry(r, scanout_addr);
-    if (!entry || !entry->data || !entry->pitch) {
+    if (!entry || !entry->data || !entry->pitch ||
+        entry->frame_time != pg->frame_time) {
         return false;
     }
 
@@ -1322,6 +1564,9 @@ void pgraph_mtl_init(NV2AState *d, Error **errp)
     pg->mtl_renderer_state = (PGRAPHMTLState *)g_malloc0(sizeof(PGRAPHMTLState));
     PGRAPHMTLState *r = pg->mtl_renderer_state;
 
+    r->clear_color[3] = 1.0f;
+    r->clear_depth = 1.0f;
+
     pgraph_mtl_init_device(r, errp);
     if (errp && *errp) {
         return;
@@ -1420,6 +1665,8 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
+    float clear_depth = 1.0f;
+    int clear_stencil = 0;
     
     if (!r) {
         return;
@@ -1432,33 +1679,78 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
         return;
     }
     
+    pgraph_mtl_surface_update_callback(d, true, write_color, write_zeta);
+
     float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t color_clear = pgraph_reg_r(pg, NV_PGRAPH_COLORCLEARVALUE);
-    rgba[0] = ((color_clear >> 16) & 0xFF) / 255.0f;
-    rgba[1] = ((color_clear >> 8) & 0xFF) / 255.0f;
-    rgba[2] = (color_clear & 0xFF) / 255.0f;
-    rgba[3] = ((color_clear >> 24) & 0xFF) / 255.0f;
+    if (write_color) {
+        pgraph_get_clear_color(pg, rgba);
+    }
+    if (write_zeta) {
+        pgraph_get_clear_depth_stencil_value(pg, &clear_depth,
+                                             &clear_stencil);
+    }
 
     r->clear_pending = true;
+    r->clear_color_pending = write_color;
+    r->clear_zeta_pending = write_zeta;
     memcpy(r->clear_color, rgba, sizeof(r->clear_color));
+    r->clear_depth = clear_depth;
+    r->clear_stencil = clear_stencil;
+
+    pg->surface_color.draw_dirty |= write_color;
+    pg->surface_zeta.draw_dirty |= write_zeta;
 
     if (r->render_encoder) {
-        pgraph_mtl_clear(r, rgba[0], rgba[1], rgba[2], rgba[3]);
+        pgraph_mtl_end_command_buffer(r);
     }
+    if (r->command_buffer) {
+        pgraph_mtl_submit_command_buffer(r);
+    }
+
+    pgraph_mtl_begin_command_buffer(r);
+    pgraph_mtl_end_command_buffer(r);
+    pgraph_mtl_submit_command_buffer(r);
+    r->display_valid = false;
 }
 
 static void pgraph_mtl_draw_begin(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
+    uint32_t control_0;
+    bool mask_alpha;
+    bool mask_red;
+    bool mask_green;
+    bool mask_blue;
+    bool color_write;
+    bool depth_test;
+    bool stencil_test;
     
     if (!r) {
         return;
     }
 
+    control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    mask_alpha = control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE;
+    mask_red = control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE;
+    mask_green = control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE;
+    mask_blue = control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE;
+    color_write = mask_alpha || mask_red || mask_green || mask_blue;
+    depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
+    stencil_test = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) &
+                   NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+
     pgraph_mtl_update_viewport(d);
     r->color_format = pg->surface_shape.color_format;
     r->zeta_format = pg->surface_shape.zeta_format;
+    r->clip_x = pg->surface_shape.clip_x;
+    r->clip_y = pg->surface_shape.clip_y;
+    r->clip_width = pg->surface_shape.clip_width;
+    r->clip_height = pg->surface_shape.clip_height;
+    pgraph_apply_anti_aliasing_factor(pg, &r->clip_x, &r->clip_y);
+    pgraph_apply_anti_aliasing_factor(pg, &r->clip_width, &r->clip_height);
+    pgraph_apply_scaling_factor(pg, &r->clip_x, &r->clip_y);
+    pgraph_apply_scaling_factor(pg, &r->clip_width, &r->clip_height);
     r->texture_enable_mask = 0;
     for (unsigned int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         if (pgraph_mtl_texture_stage_usable(pg, i)) {
@@ -1512,6 +1804,7 @@ static void pgraph_mtl_draw_begin(NV2AState *d)
     r->alpha_test_enabled =
         pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) &
         NV_PGRAPH_CONTROL_0_ALPHATESTENABLE;
+    r->zpass_pixel_count_enable = pg->zpass_pixel_count_enable;
     r->alpha_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
                              NV_PGRAPH_CONTROL_0_ALPHAFUNC);
     r->alpha_ref = (float)GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
@@ -1548,6 +1841,8 @@ static void pgraph_mtl_draw_begin(NV2AState *d)
     pgraph_argb_pack32_to_rgba_float(pgraph_reg_r(pg, NV_PGRAPH_FOGCOLOR),
                                      r->fog_color);
     pgraph_mtl_surface_update(r);
+    pgraph_mtl_surface_update_callback(d, true, color_write,
+                                       depth_test || stencil_test);
     pgraph_mtl_begin_command_buffer(r);
     pgraph_mtl_bind_textures(d);
     pgraph_mtl_bind_vertex_data(d);
@@ -1557,15 +1852,31 @@ static void pgraph_mtl_draw_end(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
+    uint32_t control_0;
+    bool color_write;
+    bool depth_test;
+    bool stencil_test;
     
     if (!r) {
         return;
     }
+
+    control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    color_write = (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE) ||
+                  (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE) ||
+                  (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE) ||
+                  (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE);
+    depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
+    stencil_test = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) &
+                   NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
     
     uint32_t vertex_count = pgraph_mtl_prepare_vertices(d);
 
     if (vertex_count > 0) {
         pgraph_mtl_draw(r, false, 0, vertex_count);
+        pg->draw_time++;
+        pg->surface_color.draw_dirty |= color_write;
+        pg->surface_zeta.draw_dirty |= depth_test || stencil_test;
     }
     
     pgraph_mtl_end_command_buffer(r);
@@ -1598,12 +1909,25 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
+    bool fb_dirty;
     
     if (!r) {
         return;
     }
 
-    if (upload && color_write && r->surface_color) {
+    color_write = color_write && (pg->clearing || pgraph_color_write_enabled(pg));
+    zeta_write = zeta_write && (pg->clearing || pgraph_zeta_write_enabled(pg));
+
+    fb_dirty = pgraph_mtl_framebuffer_dirty(pg);
+    if (upload && fb_dirty) {
+        memcpy(&pg->last_surface_shape, &pg->surface_shape,
+               sizeof(SurfaceShape));
+        pg->surface_color.buffer_dirty = true;
+        pg->surface_zeta.buffer_dirty = true;
+    }
+
+    if (upload && color_write && pg->surface_color.buffer_dirty &&
+        r->surface_color) {
         DMAObject dma = nv_dma_load(d, pg->dma_color);
         unsigned int width = pg->surface_binding_dim.width;
         unsigned int height = pg->surface_binding_dim.height;
@@ -1621,7 +1945,8 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
 
         surface_size = (hwaddr)pg->surface_color.pitch * height;
         if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS && width && height &&
-            pg->surface_color.offset <= dma.limit) {
+            pg->surface_color.offset <= dma.limit &&
+            surface_size <= dma.limit + 1 - pg->surface_color.offset) {
             surface_addr = dma.address + pg->surface_color.offset;
         } else {
             surface_addr = memory_region_size(d->vram);
@@ -1693,10 +2018,13 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
             if (swizzle) {
                 g_free(buf);
             }
+
+            pg->surface_color.buffer_dirty = false;
         }
     }
 
-    if (upload && zeta_write && r->surface_zeta) {
+    if (upload && zeta_write && pg->surface_zeta.buffer_dirty &&
+        r->surface_zeta) {
         DMAObject dma = nv_dma_load(d, pg->dma_zeta);
         unsigned int width = pg->surface_binding_dim.width;
         unsigned int height = pg->surface_binding_dim.height;
@@ -1714,7 +2042,8 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
 
         surface_size = (hwaddr)pg->surface_zeta.pitch * height;
         if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS && width && height &&
-            pg->surface_zeta.offset <= dma.limit) {
+            pg->surface_zeta.offset <= dma.limit &&
+            surface_size <= dma.limit + 1 - pg->surface_zeta.offset) {
             surface_addr = dma.address + pg->surface_zeta.offset;
         } else {
             surface_addr = memory_region_size(d->vram);
@@ -1786,6 +2115,8 @@ static void pgraph_mtl_surface_update_callback(NV2AState *d, bool upload,
             if (swizzle) {
                 g_free(buf);
             }
+
+            pg->surface_zeta.buffer_dirty = false;
         }
     }
 
@@ -1802,16 +2133,23 @@ void pgraph_mtl_surface_update_from_vram(NV2AState *d, bool upload,
         return;
     }
 
-    if (!upload || (!color_write && !zeta_write)) {
+    if (!upload) {
+        if (color_write && pg->surface_color.draw_dirty) {
+            pgraph_mtl_surface_download_color(d);
+            pg->surface_color.draw_dirty = false;
+        }
+        pg->surface_zeta.draw_dirty = false;
+        r->display_valid = false;
+        return;
+    }
+
+    if (!color_write && !zeta_write) {
         r->display_valid = false;
         return;
     }
 
     r->framebuffer_texture = r->surface_color;
-
-    if (color_write && !pgraph_mtl_display_refresh(r)) {
-        r->display_valid = false;
-    }
+    r->display_valid = false;
 }
 
 static void pgraph_mtl_update_display_size(NV2AState *d)
@@ -1940,7 +2278,11 @@ void pgraph_mtl_surface_flush(NV2AState *d)
     pgraph_mtl_surface_update(r);
     
     if (r->surface_color || r->surface_zeta) {
-        pgraph_mtl_surface_update_callback(d, true, true, true);
+        pgraph_mtl_flush_draw(d);
+        if (r) {
+            pgraph_mtl_wait_idle(r);
+        }
+        pgraph_mtl_surface_update_callback(d, false, true, true);
         pgraph_mtl_snapshot_current_surface(d);
         pgraph_mtl_update_display_size(d);
     }
@@ -1967,7 +2309,139 @@ static void pgraph_mtl_get_report(NV2AState *d, uint32_t parameter)
 static void pgraph_mtl_image_blit_wrapper(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
-    pgraph_mtl_image_blit(pg->mtl_renderer_state);
+    ContextSurfaces2DState *context_surfaces = &pg->context_surfaces_2d;
+    ImageBlitState *image_blit = &pg->image_blit;
+    BetaState *beta = &pg->beta;
+    unsigned int bytes_per_pixel;
+    hwaddr source_dma_len;
+    uint8_t *source;
+    hwaddr dest_dma_len;
+    uint8_t *dest;
+    hwaddr dest_addr;
+    hwaddr source_offset;
+    hwaddr dest_offset;
+    size_t max_row_pixels;
+    size_t row_pixels;
+    hwaddr dest_size;
+    uint8_t *source_row;
+    uint8_t *dest_row;
+    size_t row_bytes;
+    size_t adjusted_height;
+    size_t leftover_bytes;
+    hwaddr clipped_dest_size;
+    bool needs_alpha_patching = false;
+    uint8_t alpha_override = 0;
+
+    pgraph_mtl_surface_update_callback(d, false, true, true);
+
+    switch (context_surfaces->color_format) {
+    case NV062_SET_COLOR_FORMAT_LE_Y8:
+        bytes_per_pixel = 1;
+        break;
+    case NV062_SET_COLOR_FORMAT_LE_R5G6B5:
+        bytes_per_pixel = 2;
+        break;
+    case NV062_SET_COLOR_FORMAT_LE_A8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8_Z8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_Y32:
+        bytes_per_pixel = 4;
+        break;
+    default:
+        return;
+    }
+
+    source = (uint8_t *)nv_dma_map(d, context_surfaces->dma_image_source,
+                                   &source_dma_len);
+    if (!source || context_surfaces->source_offset >= source_dma_len) {
+        return;
+    }
+    source += context_surfaces->source_offset;
+    dest = (uint8_t *)nv_dma_map(d, context_surfaces->dma_image_dest,
+                                 &dest_dma_len);
+    if (!dest || context_surfaces->dest_offset >= dest_dma_len) {
+        return;
+    }
+    dest += context_surfaces->dest_offset;
+    dest_addr = dest - d->vram_ptr;
+
+    source_offset = image_blit->in_y * context_surfaces->source_pitch +
+                    image_blit->in_x * bytes_per_pixel;
+    dest_offset = image_blit->out_y * context_surfaces->dest_pitch +
+                  image_blit->out_x * bytes_per_pixel;
+
+    max_row_pixels = MIN(context_surfaces->source_pitch,
+                         context_surfaces->dest_pitch) /
+                     bytes_per_pixel;
+    row_pixels = MIN(max_row_pixels, image_blit->width);
+    dest_size = (image_blit->height - 1) * context_surfaces->dest_pitch +
+                image_blit->width * bytes_per_pixel;
+    source_row = source + source_offset;
+    dest_row = dest + dest_offset;
+    row_bytes = row_pixels * bytes_per_pixel;
+    adjusted_height = image_blit->height;
+    leftover_bytes = 0;
+
+    clipped_dest_size = nv_clip_gpu_tile_blit(d, dest_addr + dest_offset,
+                                              dest_size);
+    if (clipped_dest_size < dest_size) {
+        adjusted_height = clipped_dest_size / context_surfaces->dest_pitch;
+        leftover_bytes = clipped_dest_size -
+                         adjusted_height * context_surfaces->dest_pitch;
+    }
+
+    if (adjusted_height > 0) {
+        pgraph_mtl_perform_blit(image_blit->operation, source_row, dest_row,
+                                row_pixels, adjusted_height, row_bytes,
+                                context_surfaces->source_pitch,
+                                context_surfaces->dest_pitch, beta);
+    }
+
+    if (leftover_bytes > 0) {
+        pgraph_mtl_perform_blit(
+            image_blit->operation,
+            source_row + adjusted_height * context_surfaces->source_pitch,
+            dest_row + adjusted_height * context_surfaces->dest_pitch,
+            leftover_bytes / bytes_per_pixel, 1, leftover_bytes,
+            context_surfaces->source_pitch,
+            context_surfaces->dest_pitch, beta);
+    }
+
+    switch (context_surfaces->color_format) {
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8:
+        needs_alpha_patching = true;
+        alpha_override = 0xff;
+        break;
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8_Z8R8G8B8:
+        needs_alpha_patching = true;
+        alpha_override = 0;
+        break;
+    default:
+        break;
+    }
+
+    if (needs_alpha_patching) {
+        if (adjusted_height > 0) {
+            pgraph_mtl_patch_alpha(dest_row, row_pixels, adjusted_height,
+                                   context_surfaces->dest_pitch,
+                                   alpha_override);
+        }
+        if (leftover_bytes > 0) {
+            pgraph_mtl_patch_alpha(
+                dest_row + adjusted_height * context_surfaces->dest_pitch,
+                leftover_bytes / 4, 1, 0, alpha_override);
+        }
+    }
+
+    memory_region_set_client_dirty(d->vram, dest_addr + dest_offset,
+                                   clipped_dest_size, DIRTY_MEMORY_VGA);
+    memory_region_set_client_dirty(d->vram, dest_addr + dest_offset,
+                                   clipped_dest_size, DIRTY_MEMORY_NV2A_TEX);
+    pg->surface_color.buffer_dirty = true;
+    pg->surface_zeta.buffer_dirty = true;
+    if (pg->mtl_renderer_state) {
+        pg->mtl_renderer_state->display_valid = false;
+    }
 }
 
 static void pgraph_mtl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -1989,8 +2463,11 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
     unsigned int gl_texture;
+    void *export_texture;
+    uint32_t export_width;
+    uint32_t export_height;
 
-    if (!r || !r->display_texture || !r->display_valid) {
+    if (!r) {
         return 0;
     }
 
@@ -2001,15 +2478,28 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.sync_complete);
 
-    if (!r->display_texture || !r->display_valid ||
-        r->display_width == 0 || r->display_height == 0) {
-        return 0;
+    export_texture = r->framebuffer_texture ? r->framebuffer_texture :
+                     r->surface_color;
+    export_width = r->viewport_width;
+    export_height = r->viewport_height;
+
+    if (!export_texture || export_width == 0 || export_height == 0) {
+        if (!r->display_valid && r->surface_color) {
+            (void)pgraph_mtl_display_refresh(r);
+        }
+        if (!r->display_texture || !r->display_valid ||
+            r->display_width == 0 || r->display_height == 0) {
+            return 0;
+        }
+        export_texture = r->display_texture;
+        export_width = r->display_width;
+        export_height = r->display_height;
     }
 
     gl_texture = pgraph_mtl_display_get_gl_texture(r->device,
-                                                   r->display_texture,
-                                                   r->display_width,
-                                                   r->display_height);
+                                                   export_texture,
+                                                   export_width,
+                                                   export_height);
     return gl_texture;
 }
 
@@ -2173,9 +2663,26 @@ void pgraph_mtl_bind_textures(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHMTLState *r = pg->mtl_renderer_state;
+    DMAObject color_dma;
+    hwaddr current_surface_addr = 0;
+    hwaddr current_surface_size = 0;
+    bool current_surface_downloaded = false;
+    bool have_current_surface = false;
     
     if (!r) {
         return;
+    }
+
+    color_dma = nv_dma_load(d, pg->dma_color);
+    if (r->surface_color && color_dma.dma_class == NV_DMA_IN_MEMORY_CLASS &&
+        pg->surface_binding_dim.height &&
+        pg->surface_color.offset <= color_dma.limit) {
+        current_surface_size = (hwaddr)pg->surface_color.pitch *
+                               pg->surface_binding_dim.height;
+        if (current_surface_size <= color_dma.limit + 1 - pg->surface_color.offset) {
+            current_surface_addr = color_dma.address + pg->surface_color.offset;
+            have_current_surface = true;
+        }
     }
     
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
@@ -2201,6 +2708,23 @@ void pgraph_mtl_bind_textures(NV2AState *d)
         };
         hwaddr texture_vram_offset = pgraph_get_texture_phys_addr(pg, i);
         size_t length = pgraph_get_texture_length(pg, &state);
+
+        if (have_current_surface && !current_surface_downloaded && length) {
+            hwaddr tex_end = texture_vram_offset + length;
+            hwaddr surface_end = current_surface_addr + current_surface_size;
+            bool overlapping = !(current_surface_addr >= tex_end ||
+                                 texture_vram_offset >= surface_end);
+
+            if (overlapping && pg->surface_color.draw_dirty) {
+                pgraph_mtl_flush_draw(d);
+                pgraph_mtl_wait_idle(r);
+                pgraph_mtl_surface_download_color(d);
+                pg->surface_color.draw_dirty = false;
+                pg->surface_color.buffer_dirty = false;
+                r->display_valid = false;
+                current_surface_downloaded = true;
+            }
+        }
         
         if (texture_vram_offset >= memory_region_size(d->vram)) {
             continue;

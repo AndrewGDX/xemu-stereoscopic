@@ -80,17 +80,26 @@ typedef struct PGRAPHMTLState {
     bool command_buffer_in_progress;
     bool render_pass_active;
     bool clear_pending;
+    bool clear_color_pending;
+    bool clear_zeta_pending;
+    bool zpass_pixel_count_enable;
 
     uint32_t current_frame_index;
     uint64_t frame_count;
 
     float clear_color[4];
+    float clear_depth;
+    uint32_t clear_stencil;
     
     uint32_t color_format;
     uint32_t zeta_format;
     
     uint32_t viewport_width;
     uint32_t viewport_height;
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_width;
+    uint32_t clip_height;
     
     void *display_layer;
     void *display_drawable;

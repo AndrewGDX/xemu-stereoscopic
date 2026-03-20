@@ -9,6 +9,7 @@
 #if TARGET_OS_MAC
 
 #import <Metal/Metal.h>
+#import <simd/simd.h>
 
 #include "hw/xbox/nv2a/nv2a_regs.h"
 
@@ -31,8 +32,9 @@ typedef struct MTLFragmentUniforms {
     uint32_t rgb_outputs[8];
     uint32_t alpha_inputs[8];
     uint32_t alpha_outputs[8];
-    float combiner_consts[18][4];
-    float fog_color[4];
+    uint32_t pad0[3];
+    simd_float4 combiner_consts[18];
+    simd_float4 fog_color;
     uint32_t tex_modes[4];
     uint32_t input_tex[4];
     uint32_t dot_map[4];
@@ -44,7 +46,7 @@ typedef struct MTLFragmentUniforms {
     uint32_t tex_cubemap[4];
     uint32_t dim_tex[4];
     uint32_t compare_mode[4][4];
-    float bump_mat[4][4];
+    simd_float4 bump_mat[4];
     float bump_scale[4];
     float bump_offset[4];
 } MTLFragmentUniforms;
@@ -182,6 +184,8 @@ static MTLBlendOperation pgraph_mtl_blend_op(unsigned int eqn)
 
 void pgraph_mtl_init_pipelines(PGRAPHMTLState *r)
 {
+    bool depth_enabled;
+
     if (!r->device || !r->shader_library) {
         return;
     }
@@ -313,9 +317,13 @@ void pgraph_mtl_init_pipelines(PGRAPHMTLState *r)
     r->pipeline_state = (__bridge void *)pipeline;
     
     MTLDepthStencilDescriptor *depthDesc = [[MTLDepthStencilDescriptor alloc] init];
-    depthDesc.depthCompareFunction = pgraph_mtl_compare_func(
-        MTL_GET_MASK(r->control_0_reg, NV_PGRAPH_CONTROL_0_ZFUNC));
-    depthDesc.depthWriteEnabled = !!(r->control_0_reg &
+    depth_enabled = !!(r->control_0_reg & NV_PGRAPH_CONTROL_0_ZENABLE);
+    depthDesc.depthCompareFunction = depth_enabled ?
+        pgraph_mtl_compare_func(MTL_GET_MASK(r->control_0_reg,
+                                             NV_PGRAPH_CONTROL_0_ZFUNC)) :
+        MTLCompareFunctionAlways;
+    depthDesc.depthWriteEnabled = depth_enabled &&
+                                  !!(r->control_0_reg &
                                      NV_PGRAPH_CONTROL_0_ZWRITEENABLE);
 
     if (r->control_1_reg & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE) {
@@ -371,12 +379,21 @@ void pgraph_mtl_destroy_pipelines(PGRAPHMTLState *r)
 
 void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, uint32_t vertex_count)
 {
-    if (!r->command_buffer || !r->render_encoder || !r->pipeline_state) {
+    bool cull_all = false;
+
+    if (!r->command_buffer || !r->render_encoder) {
         return;
     }
     
     if (vertex_count == 0) {
         return;
+    }
+
+    if (!r->pipeline_state) {
+        pgraph_mtl_init_pipelines(r);
+        if (!r->pipeline_state) {
+            return;
+        }
     }
     
     id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)r->render_encoder;
@@ -390,6 +407,18 @@ void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, 
     if (r->depth_stencil_state) {
         id<MTLDepthStencilState> depthState = (__bridge id<MTLDepthStencilState>)r->depth_stencil_state;
         [encoder setDepthStencilState:depthState];
+        [encoder setStencilReferenceValue:MTL_GET_MASK(r->control_1_reg,
+                                                       NV_PGRAPH_CONTROL_1_STENCIL_REF)];
+    }
+
+    if (r->clip_width && r->clip_height) {
+        MTLScissorRect scissor = {
+            .x = r->clip_x,
+            .y = r->clip_y,
+            .width = r->clip_width,
+            .height = r->clip_height,
+        };
+        [encoder setScissorRect:scissor];
     }
 
     if (r->setup_raster_reg & NV_PGRAPH_SETUPRASTER_CULLENABLE) {
@@ -401,7 +430,7 @@ void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, 
             [encoder setCullMode:MTLCullModeBack];
             break;
         case NV_PGRAPH_SETUPRASTER_CULLCTRL_FRONT_AND_BACK:
-            [encoder setCullMode:MTLCullModeFront];
+            cull_all = true;
             break;
         default:
             [encoder setCullMode:MTLCullModeNone];
@@ -412,6 +441,10 @@ void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, 
     }
     [encoder setFrontFacingWinding:(r->setup_raster_reg & NV_PGRAPH_SETUPRASTER_FRONTFACE) ?
         MTLWindingCounterClockwise : MTLWindingClockwise];
+
+    if (cull_all) {
+        return;
+    }
 
     if (r->blend_reg & NV_PGRAPH_BLEND_EN) {
         float blend_constants[4] = {
@@ -460,7 +493,8 @@ void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, 
     memcpy(frag_uniforms.alpha_outputs, r->alpha_outputs, sizeof(frag_uniforms.alpha_outputs));
     memcpy(frag_uniforms.combiner_consts, r->combiner_consts,
            sizeof(frag_uniforms.combiner_consts));
-    memcpy(frag_uniforms.fog_color, r->fog_color, sizeof(frag_uniforms.fog_color));
+    memcpy(&frag_uniforms.fog_color, r->fog_color,
+           sizeof(frag_uniforms.fog_color));
     memcpy(frag_uniforms.tex_modes, r->tex_modes, sizeof(frag_uniforms.tex_modes));
     memcpy(frag_uniforms.input_tex, r->input_tex, sizeof(frag_uniforms.input_tex));
     memcpy(frag_uniforms.dot_map, r->dot_map, sizeof(frag_uniforms.dot_map));
@@ -485,7 +519,8 @@ void pgraph_mtl_draw(PGRAPHMTLState *r, bool is_indexed, uint32_t first_vertex, 
         }
     }
 
-    if (r->visibility_result_buffer && r->num_queries_in_flight < r->max_queries_in_flight) {
+    if (r->zpass_pixel_count_enable && r->visibility_result_buffer &&
+        r->num_queries_in_flight < r->max_queries_in_flight) {
         [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting
                                   offset:r->num_queries_in_flight * sizeof(uint64_t)];
         r->query_in_flight = true;
@@ -525,6 +560,7 @@ void pgraph_mtl_clear(PGRAPHMTLState *r, float r_val, float g_val, float b_val, 
     }
 
     r->clear_pending = true;
+    r->clear_color_pending = true;
     r->clear_color[0] = r_val;
     r->clear_color[1] = g_val;
     r->clear_color[2] = b_val;

@@ -102,7 +102,10 @@ void pgraph_mtl_init_surfaces(PGRAPHMTLState *r)
 
 void pgraph_mtl_surface_update(PGRAPHMTLState *r)
 {
-    if (!r->device || !r->surface_color) {
+    MTLPixelFormat desired_color_format;
+    MTLPixelFormat desired_zeta_format;
+
+    if (!r->device) {
         return;
     }
     
@@ -113,10 +116,18 @@ void pgraph_mtl_surface_update(PGRAPHMTLState *r)
     
     if (width == 0) width = 640;
     if (height == 0) height = 480;
+
+    desired_color_format = pgraph_mtl_color_pixel_format(r->color_format);
+    desired_zeta_format = pgraph_mtl_zeta_pixel_format(r->zeta_format);
     
-    id<MTLTexture> colorTex = (__bridge id<MTLTexture>)r->surface_color;
+    id<MTLTexture> colorTex = r->surface_color ?
+        (__bridge id<MTLTexture>)r->surface_color : nil;
+    id<MTLTexture> depthTex = r->surface_zeta ?
+        (__bridge id<MTLTexture>)r->surface_zeta : nil;
     
-    if (colorTex.width != width || colorTex.height != height) {
+    if (!colorTex || colorTex.width != width || colorTex.height != height ||
+        colorTex.pixelFormat != desired_color_format ||
+        !depthTex || depthTex.pixelFormat != desired_zeta_format) {
         if (r->surface_color) {
             r->surface_color = NULL;
         }
@@ -124,19 +135,19 @@ void pgraph_mtl_surface_update(PGRAPHMTLState *r)
             r->surface_zeta = NULL;
         }
         
-        MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_color_pixel_format(r->color_format)
-                                                                                         width:width
-                                                                                        height:height
-                                                                                     mipmapped:NO];
+        MTLTextureDescriptor *colorDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:desired_color_format
+                                                                                          width:width
+                                                                                         height:height
+                                                                                      mipmapped:NO];
         colorDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         colorDesc.storageMode = MTLStorageModeManaged;
         
         r->surface_color = (__bridge void *)[device newTextureWithDescriptor:colorDesc];
         
-        MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pgraph_mtl_zeta_pixel_format(r->zeta_format)
-                                                                                           width:width
-                                                                                          height:height
-                                                                                       mipmapped:NO];
+        MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:desired_zeta_format
+                                                                                            width:width
+                                                                                           height:height
+                                                                                        mipmapped:NO];
         depthDesc.usage = MTLTextureUsageRenderTarget;
         depthDesc.storageMode = pgraph_mtl_zeta_storage_mode();
         
