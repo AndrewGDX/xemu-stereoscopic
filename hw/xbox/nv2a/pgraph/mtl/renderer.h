@@ -90,6 +90,11 @@ typedef struct PGRAPHMTLState {
     float clear_color[4];
     float clear_depth;
     uint32_t clear_stencil;
+    uint32_t clear_scissor_x;
+    uint32_t clear_scissor_y;
+    uint32_t clear_scissor_width;
+    uint32_t clear_scissor_height;
+    bool clear_full;
     
     uint32_t color_format;
     uint32_t zeta_format;
@@ -260,6 +265,7 @@ void pgraph_mtl_clear(PGRAPHMTLState *r, float r_val, float g_val, float b_val, 
 
 void pgraph_mtl_begin_command_buffer(PGRAPHMTLState *r);
 void pgraph_mtl_end_command_buffer(PGRAPHMTLState *r);
+void pgraph_mtl_set_clear_scissor(PGRAPHMTLState *r, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 void pgraph_mtl_submit_command_buffer(PGRAPHMTLState *r);
 void pgraph_mtl_wait_idle(PGRAPHMTLState *r);
 void pgraph_mtl_sync_texture_for_cpu(PGRAPHMTLState *r, void *texture);
@@ -283,6 +289,9 @@ void *pgraph_mtl_display_get_texture(PGRAPHMTLState *r);
 bool pgraph_mtl_display_upload(PGRAPHMTLState *r, const void *data,
                                uint32_t width, uint32_t height,
                                uint32_t bytes_per_row);
+
+void *MTLCreateSystemDefaultDevice_C(void);
+const char *MTLDevice_getName_C(void *device);
 
 #ifdef __cplusplus
 extern "C" {

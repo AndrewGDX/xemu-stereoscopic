@@ -100,6 +100,22 @@ void pgraph_mtl_end_command_buffer(PGRAPHMTLState *r)
     r->render_pass_active = false;
 }
 
+void pgraph_mtl_set_clear_scissor(PGRAPHMTLState *r, uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+{
+    if (!r || !r->render_encoder) {
+        return;
+    }
+    
+    id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)r->render_encoder;
+    MTLScissorRect scissor = {
+        .x = x,
+        .y = y,
+        .width = width,
+        .height = height
+    };
+    [encoder setScissorRect:scissor];
+}
+
 void pgraph_mtl_submit_command_buffer(PGRAPHMTLState *r)
 {
     if (!r->command_buffer) {

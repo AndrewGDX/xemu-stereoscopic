@@ -94,12 +94,38 @@ bool pgraph_mtl_display_refresh(PGRAPHMTLState *r)
     id<MTLTexture> surfaceTex = (__bridge id<MTLTexture>)r->surface_color;
     id<MTLTexture> displayTex = (__bridge id<MTLTexture>)r->display_texture;
 
-    if (!surfaceTex || !displayTex) {
+    if (!surfaceTex) {
         return false;
     }
 
-    if (r->display_width != surfaceTex.width ||
-        r->display_height != surfaceTex.height) {
+    uint32_t srcWidth = surfaceTex.width;
+    uint32_t srcHeight = surfaceTex.height;
+    
+    if (!displayTex || r->display_width != srcWidth || r->display_height != srcHeight) {
+        id<MTLDevice> device = (__bridge id<MTLDevice>)r->device;
+        
+        if (displayTex) {
+            displayTex = nil;
+        }
+        r->display_texture = NULL;
+        
+        r->display_width = srcWidth;
+        r->display_height = srcHeight;
+        
+        MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                        width:srcWidth
+                                                                                       height:srcHeight
+                                                                                   mipmapped:NO];
+        texDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        texDesc.storageMode = MTLStorageModeManaged;
+        
+        r->display_texture = (__bridge void *)[device newTextureWithDescriptor:texDesc];
+        displayTex = (__bridge id<MTLTexture>)r->display_texture;
+        
+        fprintf(stderr, "Metal: Recreated display texture for %dx%d\n", srcWidth, srcHeight);
+    }
+    
+    if (!displayTex) {
         return false;
     }
     
@@ -107,7 +133,7 @@ bool pgraph_mtl_display_refresh(PGRAPHMTLState *r)
     
     id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
     
-    MTLSize sourceSize = MTLSizeMake(surfaceTex.width, surfaceTex.height, 1);
+    MTLSize sourceSize = MTLSizeMake(srcWidth, srcHeight, 1);
     
     [blitEncoder copyFromTexture:surfaceTex
                      sourceSlice:0

@@ -1547,7 +1547,7 @@ static uint32_t pgraph_mtl_prepare_vertices(NV2AState *d)
     if (expanded->len > 0) {
         pgraph_mtl_update_vertex_buffer_from_data(r, expanded->data,
                                                   expanded->len * sizeof(MTLVertex),
-                                                  0);
+                                                   0);
     }
     g_array_free(expanded, true);
     if (program_ptr) {
@@ -1555,6 +1555,15 @@ static uint32_t pgraph_mtl_prepare_vertices(NV2AState *d)
     }
 
     return r->prepared_vertex_count;
+}
+
+static void pgraph_mtl_early_context_init(void)
+{
+    fprintf(stderr, "Metal: Early context init\n");
+    void *device = MTLCreateSystemDefaultDevice_C();
+    if (device) {
+        fprintf(stderr, "Metal: Early context device: %s\n", MTLDevice_getName_C(device));
+    }
 }
 
 void pgraph_mtl_init(NV2AState *d, Error **errp)
@@ -1667,6 +1676,9 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
     PGRAPHMTLState *r = pg->mtl_renderer_state;
     float clear_depth = 1.0f;
     int clear_stencil = 0;
+    unsigned int xmin, xmax, ymin, ymax;
+    unsigned int scissor_width, scissor_height;
+    bool full_clear;
     
     if (!r) {
         return;
@@ -1681,6 +1693,29 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
     
     pgraph_mtl_surface_update_callback(d, true, write_color, write_zeta);
 
+    xmin = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTX), NV_PGRAPH_CLEARRECTX_XMIN);
+    xmax = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTX), NV_PGRAPH_CLEARRECTX_XMAX);
+    ymin = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTY), NV_PGRAPH_CLEARRECTY_YMIN);
+    ymax = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTY), NV_PGRAPH_CLEARRECTY_YMAX);
+
+    scissor_width = xmax - xmin + 1;
+    scissor_height = ymax - ymin + 1;
+    pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
+    pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
+
+    full_clear = !xmin && !ymin &&
+                 scissor_width >= pg->surface_binding_dim.width &&
+                 scissor_height >= pg->surface_binding_dim.height;
+
+    pgraph_apply_scaling_factor(pg, &xmin, &ymin);
+    pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+
+    r->clear_scissor_x = xmin;
+    r->clear_scissor_y = ymin;
+    r->clear_scissor_width = scissor_width;
+    r->clear_scissor_height = scissor_height;
+    r->clear_full = full_clear;
+    
     float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     if (write_color) {
         pgraph_get_clear_color(pg, rgba);
@@ -1708,6 +1743,11 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
     }
 
     pgraph_mtl_begin_command_buffer(r);
+    
+    if (!full_clear) {
+        pgraph_mtl_set_clear_scissor(r, xmin, ymin, scissor_width, scissor_height);
+    }
+    
     pgraph_mtl_end_command_buffer(r);
     pgraph_mtl_submit_command_buffer(r);
     r->display_valid = false;
@@ -2484,11 +2524,19 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     export_height = r->viewport_height;
 
     if (!export_texture || export_width == 0 || export_height == 0) {
+        if (r->surface_color && r->viewport_width == 0) {
+            export_width = 640;
+            export_height = 480;
+        }
+    }
+
+    if (!export_texture || export_width == 0 || export_height == 0) {
         if (!r->display_valid && r->surface_color) {
             (void)pgraph_mtl_display_refresh(r);
         }
         if (!r->display_texture || !r->display_valid ||
             r->display_width == 0 || r->display_height == 0) {
+            fprintf(stderr, "Metal: No valid surface for framebuffer export\n");
             return 0;
         }
         export_texture = r->display_texture;
@@ -2496,10 +2544,16 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
         export_height = r->display_height;
     }
 
+    fprintf(stderr, "Metal: get_framebuffer_surface exporting %dx%d texture=%p\n",
+            export_width, export_height, (void*)export_texture);
+
     gl_texture = pgraph_mtl_display_get_gl_texture(r->device,
                                                    export_texture,
                                                    export_width,
                                                    export_height);
+    if (gl_texture == 0) {
+        fprintf(stderr, "Metal: Failed to get GL texture from Metal texture\n");
+    }
     return gl_texture;
 }
 
@@ -2773,7 +2827,7 @@ static PGRAPHRenderer pgraph_mtl_renderer = {
     .name = "Metal",
     .ops = {
         .init = pgraph_mtl_init,
-        .early_context_init = NULL,
+        .early_context_init = pgraph_mtl_early_context_init,
         .finalize = pgraph_mtl_finalize,
         .clear_report_value = pgraph_mtl_clear_report_value,
         .clear_surface = pgraph_mtl_clear_surface,

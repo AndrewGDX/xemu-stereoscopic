@@ -17,6 +17,7 @@ mtl_sources = files(
 	'reports.m',
 	'gpuprops.m',
 	'instance.m',
+	'mtl_c_api.m',
 )
 
 foreach f : mtl_sources
